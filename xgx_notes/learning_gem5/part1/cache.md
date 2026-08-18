@@ -21,7 +21,24 @@ two_level.py: CPU ─► L1I/L1D ─► l2bus ─► L2 ─► membus ─► DDR
 和 `System`、`CPU`、`MemCtrl` 一样都是 SimObject，在脚本里 `from m5.objects import Cache`
 即可使用。自定义缓存就是**继承 `Cache` 并覆盖类属性/方法**。
 
-### 2. 端口（Port）的连接语义（本章最容易绕晕的点）
+### 2. 缓存寻址：tag / index / offset（Set 与 Way）
+
+CPU 访问缓存时，地址被拆成三段：
+
+```
+地址 = tag | index | offset
+```
+
+- **index** 决定去哪个 **Set**（组）；
+- **tag** 判断是不是目标数据——在 Set 内，所有 **Way** 的 tag **并行比较**，命中的那个 Way 就是目标 Cache Line；
+- **offset** 定位 Cache Line 内的具体字节。
+
+关键点：**Way 不是地址的一部分**，而是缓存内部为降低冲突而额外设置的多个存储槽位；
+`assoc=2` 的意思就是一个 Set 里有 2 个 Cache Line（2 路组相联）。
+
+一次缓存访问的流程：**index 找 Set → 并行比 tag → 读数据 → 返回 CPU**。
+
+### 3. 端口（Port）的连接语义（本章最容易绕晕的点）
 
 每个缓存有**两个端口**：
 
@@ -46,7 +63,7 @@ self.cpu_side = bus.mem_side_ports          # L2Cache.connectCPUSideBus
 self.mem_side = bus.cpu_side_ports          # L2Cache.connectMemSideBus
 ```
 
-### 3. 两级缓存的层次结构
+### 4. 两级缓存的层次结构
 
 `caches.py` 里的类继承关系：
 
@@ -60,7 +77,7 @@ Cache (gem5 内置)
 
 L1 采用**指令/数据分离**（Harvard 结构），各自独立；L2 是统一的（unified）。
 
-### 4. two_level.py 的连接拓扑（完整链路）
+### 5. two_level.py 的连接拓扑（完整链路）
 
 | 组件 | 类型 | 连接 |
 |------|------|------|
@@ -82,6 +99,22 @@ L1 采用**指令/数据分离**（Harvard 结构），各自独立；L2 是统�
 | `response_latency` | 命中时总响应延迟（cycle） | 2 | 20 |
 | `mshrs` | Miss Status Holding Registers 数量（可同时处理多少未命中） | 4 | 20 |
 | `tgts_per_mshr` | 每个 MSHR 最多合并多少个后续目标 | 20 | 12 |
+
+三个 latency 对应缓存访问时序的先后三个阶段：
+
+```
+tag_latency      查 tag（并行比较，判断命不命中）
+      ↓
+data_latency     命中后从 Data Array 读真正的数据
+      ↓
+response_latency 把数据返回给 CPU
+```
+
+- `mshrs`：**MSHR（Miss Status Holding Register，缺失状态保持寄存器）**的数量。
+  一次访问 miss 时，会分配一个 MSHR 记录「这个 miss 正在等下一级缓存/内存返回」；
+  `mshrs` 决定当前缓存能**同时处理多少个在途 miss**，MSHR 耗尽后新的 miss 只能停等。
+- `tgts_per_mshr`：**一个 miss 最多能合并多少个后续请求**——多个请求访问同一块时，
+  后到的请求不会各自开新 MSHR，而是「挂」在已有的那个 miss 上，等数据回来一起唤醒。
 
 ## 运行方式
 
