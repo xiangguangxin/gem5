@@ -20,6 +20,7 @@
 .claude/
 ├── agents/          # Claude Code 原生 subagent（cto / red-team / tech-writer / developer / verifier）
 ├── skills/          # 可被 Claude Code 加载的标准 skill（<名字>/SKILL.md）
+├── workflows/       # 确定性编排脚本（agent-team.js，内置审核闸门）
 └── README.md        # 本索引
 ```
 
@@ -62,7 +63,7 @@ Requirement
     +-- pass --> finish-development-branch 收尾
 ```
 
-编排协议详见 [skills/subagent-driven-development/SKILL.md](skills/subagent-driven-development/SKILL.md)。
+编排协议详见 [skills/subagent-driven-development/SKILL.md](skills/subagent-driven-development/SKILL.md)。确定性编排（硬性审核闸门）见 [workflows/agent-team.js](workflows/agent-team.js)。
 
 ---
 
