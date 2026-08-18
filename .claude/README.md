@@ -18,21 +18,22 @@
 
 ```
 .claude/
-├── agents/          # Claude Code 原生 subagent（cto / tech-writer / developer / verifier）
+├── agents/          # Claude Code 原生 subagent（cto / red-team / tech-writer / developer / verifier）
 ├── skills/          # 可被 Claude Code 加载的标准 skill（<名字>/SKILL.md）
 └── README.md        # 本索引
 ```
 
 ## Agent 团队
 
-`.claude/agents/*.md` 定义了 4 个 Claude Code 原生 subagent，由 `subagent-driven-development` skill 编排协作：
+`.claude/agents/*.md` 定义了 5 个 Claude Code 原生 subagent，由 `subagent-driven-development` skill 编排协作：
 
 | 角色 | subagent_type | 职责 |
 |---|---|---|
 | 架构师 | `cto` | 需求分析 → 架构方案 + 任务清单 |
+| 对抗评审 | `red-team` | 攻击架构/代码，找缺陷与失败模式（证伪） |
 | 文档 | `tech-writer` | 架构方案 → 设计文档 |
 | 开发 | `developer` | 设计 → 代码 + 单测（TDD） |
-| 验证/评审 | `verifier` | 跑 build/测试 + 评审 → 证据 |
+| 验证/评审 | `verifier` | 跑 build/测试 + 评审 → 证据（证实） |
 
 协作流程：
 
@@ -43,10 +44,16 @@ Requirement
 [cto]            → 架构方案 + 任务清单
     |
     v
+[red-team]       → 攻击架构 → 缺陷 → 回 [cto] 修订
+    |
+    v
 [tech-writer]    → 设计文档（docs/）
     |
     v
 [developer]      → 代码 + 单测
+    |
+    v
+[red-team]       → 攻击代码 → 缺陷 → 回 [developer] 修复
     |
     v
 [verifier]       → build/测试 + 评审 → 证据
