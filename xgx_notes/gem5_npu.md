@@ -133,3 +133,213 @@ Latency / Throughput / **Utilization** / Energy
 - [ ] **范围**：先 NPU-only（P1→P2），还是一开始就上 CPU+NPU 完整 SoC（P3）？
 - [ ] **Workload**：跑哪些 GEMM/网络层？（Utilization 对 layer shape 极敏感，需先定负载）
 - [ ] **Baseline**：DSE 的参照系（CPU-only？1×NPU@50GB/s？）
+
+---
+
+## 7. 基于当前 npu-perf-model 的架构审查结论
+
+结论：**总体方向可行，但 P1/P2 不能只理解成“换一行 bind”**。当前
+`npu-perf-model` 是 timing-only 的独立 SystemC 程序，接入 gem5 真实内存系统前，
+需要把几个简化假设补成显式架构设计。
+
+### 7.1 必须改：DMA payload 不能再用 1 字节 dummy
+
+当前 `DmaEngine::submitTransfer()` 里使用：
+
+```cpp
+static unsigned char dummy[1] = {0};
+gp.set_data_ptr(dummy);
+gp.set_data_length(bytes);
+```
+
+这个在自带 `Memory` 模型里能跑，是因为 `Memory` 只看 `data_length` 做时序，
+不真正读写 `data_ptr`。
+
+但 gem5 的 `TlmToGem5Bridge` 会把 TLM payload 转成 gem5 `Packet`，并使用
+`trans.get_data_ptr()` 作为 packet 数据指针：
+
+```cpp
+pkt->dataStatic(trans.get_data_ptr());
+```
+
+所以接 gem5 真实内存后，`data_ptr` 必须至少有 `bytes` 长度，否则读写大块 tile
+时会有功能错误甚至内存越界风险。
+
+建议：
+
+- `Transfer` 内部持有 `std::vector<unsigned char> data;`
+- `submitTransfer()` 按 `bytes` 分配 data buffer
+- `gp.set_data_ptr(transfer->data.data())`
+- timing-only 模式可以不关心内容，但 buffer 生命周期必须覆盖到 `END_RESP`
+
+### 7.2 必须改：地址模型不能都打到 0
+
+当前 `WorkloadDriver` 的访存地址都是 0：
+
+```cpp
+dma_->read(/*addr=*/0, bytes, kind, tid);
+dma_->write(/*addr=*/0, bytes, TileExtension::OUTPUT, tid);
+```
+
+异步接口 `issue_read()` / `issue_write()` 也没有地址参数，内部固定传 `addr=0`。
+
+这对独立 HBM timing 模型没问题，因为它只统计 bytes 和 latency；但对 gem5 内存系统，
+地址会影响：
+
+- memory range 是否合法
+- cache line 映射
+- bank/channel 映射
+- Ruby directory 映射
+- 多 NPU 是否访问同一片地址
+- CPU/NPU 共享内存一致性
+
+建议新增显式地址布局：
+
+```text
+A_base / B_base / C_base
+tile_addr(kind, i, j, k)
+```
+
+并修改 DMA API：
+
+```cpp
+TransferPtr issue_read(uint64_t addr, uint32_t bytes, Kind kind, uint32_t tile_id);
+TransferPtr issue_write(uint64_t addr, uint32_t bytes, Kind kind, uint32_t tile_id);
+```
+
+P2 的 NPU-only 可以先用简单线性地址；P3 的 CPU+NPU 必须和 CPU 侧分配/传参一致。
+
+### 7.3 必须改：独立 sc_main 要拆成可被 gem5 实例化的模块
+
+当前顶层在 `src/main.cpp` 中：
+
+```cpp
+Memory         mem("mem", cfg);
+OnchipBuffer   buf("buf", cfg);
+DmaEngine      dma("dma", cfg);
+PeArray        pe("pe", cfg);
+WorkloadDriver drv("drv", cfg, task, &dma, &buf, &pe);
+dma.isock.bind(mem.tsock);
+sc_start();
+```
+
+接入 gem5 后，`sc_start()` 应由 gem5 的 `SystemC_Kernel` 驱动，NPU 不应再作为独立
+可执行程序的 `sc_main()` 自己启动仿真。
+
+建议拆成：
+
+```text
+NpuTop : sc_module
+  - OnchipBuffer
+  - DmaEngine
+  - PeArray
+  - WorkloadDriver
+  - 对外暴露 dma.isock
+```
+
+独立 repo 仍保留 `main.cpp` 做 standalone 测试；gem5 侧使用 `NpuTop` 或 gem5
+SimObject wrapper 来实例化。
+
+### 7.4 P2 建议先走 classic memory，不要一开始上 Ruby coherent
+
+如果目标只是先跑通：
+
+```text
+NPU DMA -> TlmToGem5Bridge64 -> membus -> MemCtrl -> DRAM
+```
+
+可以先用 classic memory system，避开 CPU cache coherence。
+
+如果 P3 要做：
+
+```text
+CPU cache + NPU DMA 共享内存
+```
+
+就必须明确一致性策略：
+
+- 非一致性 DMA：CPU 通过 cache flush/invalidate 或 uncached memory region 配合
+- Ruby DMA controller：把 NPU DMA 请求接进 Ruby 协议路径
+- coherent IO：让 NPU 请求参与系统一致性
+
+否则 CPU cache 可能持有旧数据，NPU 写 DRAM 后 CPU 读不到最新结果。
+
+### 7.5 `hbm_bw` 旋钮要决定由谁负责
+
+当前 NPU 模型里 `Memory` 用 `hbm_bw_GBps` 和 `hbm_lat_cyc` 建模 HBM 时序。
+如果 P2 扔掉自带 `Memory`，改走 gem5 `MemCtrl`，那么内存带宽/延迟应该主要由
+gem5 内存配置决定。
+
+建议拆分语义：
+
+| 参数 | 归属 | 作用 |
+|------|------|------|
+| `buf_bw_Bpc` | NPU 模型 | 片上 SRAM/NoC 到 PE 的内部带宽 |
+| `dma_outstanding` | NPU 模型 | DMA 发起端并发窗口 |
+| `hbm_bw_GBps` | standalone 模式 | 自带 Memory 桩的带宽 |
+| gem5 MemCtrl 参数 | gem5 模式 | 真实 DRAM 带宽和延迟 |
+
+这样避免 standalone 模型和 gem5 memory 同时限制带宽，导致重复建模。
+
+### 7.6 P1/P2 推荐调整后的最小闭环
+
+新的推荐顺序：
+
+1. **P1a：保留 standalone npu_sim**，继续用自带 `Memory` 做 sanity baseline。
+2. **P1b：抽出 `NpuTop`**，去掉对 `sc_main()` 的强依赖。
+3. **P1c：修 DMA payload buffer**，保证 `data_ptr` 长度等于 `data_length`。
+4. **P1d：加入 tile 地址生成**，不再所有访问都使用地址 0。
+5. **P2a：gem5 内实例化 `SystemC_Kernel` + `NpuTop` + `TlmToGem5Bridge64`。**
+6. **P2b：NPU-only 连接 classic membus/DRAM**，先看 gem5 `stats.txt` 中的内存请求。
+7. **P2c：对齐 standalone Memory 与 gem5 MemCtrl 的 latency/bandwidth，做误差检查。**
+8. **P3：再加入 CPU offload 和一致性策略。**
+
+### 7.7 修改后的架构图
+
+P2 推荐目标：
+
+```text
+             gem5 Python config
+                    │
+             SystemC_Kernel
+                    │
+          ┌─────────▼─────────┐
+          │      NpuTop       │
+          │  WorkloadDriver   │
+          │  PeArray          │
+          │  OnchipBuffer     │
+          │  DmaEngine        │
+          └─────────┬─────────┘
+                    │ TLM initiator socket
+                    ▼
+          TlmToGem5Bridge64.tlm
+                    │ gem5 RequestPort
+                    ▼
+              membus / xbar
+                    │
+                  MemCtrl
+                    │
+                   DRAM
+```
+
+P3 加 CPU 后：
+
+```text
+CPU ── cache hierarchy ─┐
+                        ├── shared memory system ── DRAM
+NPU ── TLM bridge ──────┘
+
+关键问题：CPU cache 与 NPU DMA 是否一致？
+```
+
+### 7.8 最终判断
+
+原方案的方向是对的：**NPU 保留 PE/Buffer/DMA/Driver，末端通过 gem5 TLM bridge 接入
+gem5 内存系统**。
+
+但架构需要补上四个硬要求：
+
+1. DMA payload 必须有真实 `bytes` 长度的 data buffer。
+2. WorkloadDriver 必须生成真实 tile 地址。
+3. 独立 `sc_main()` 必须拆成 gem5 可实例化的 NPU top/module。
+4. CPU+NPU 阶段必须明确 DMA 与 CPU cache 的一致性策略。
