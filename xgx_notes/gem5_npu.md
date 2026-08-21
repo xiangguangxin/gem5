@@ -92,8 +92,9 @@ Latency / Throughput / **Utilization** / Energy
                                                 membus → MemCtrl → DRAM   ← gem5 真实内存
 ```
 
-- NPU 侧的 **PE Array / Buffer / WorkloadDriver / DmaEngine 全部原样保留**，
-  只有最后 `dma.isock.bind(...)` 一行，从 `mem.tsock` 换成 gem5 桥的 target socket。
+- NPU 侧的 **PE Array / Buffer / WorkloadDriver / DmaEngine 的核心 timing 逻辑保留**，
+  但需要补齐真实 DMA payload、真实地址生成，并把独立 `sc_main()` 拆成 gem5 可实例化的
+  NPU SimObject / SystemC 模块。
 - 附带好处：roadmap 里「Memory Bandwidth」这个旋钮，正好落到 gem5 的 `MemCtrl`/DDR
   配置上，不必再在 HBM 桩里手调。
 
@@ -343,3 +344,429 @@ gem5 内存系统**。
 2. WorkloadDriver 必须生成真实 tile 地址。
 3. 独立 `sc_main()` 必须拆成 gem5 可实例化的 NPU top/module。
 4. CPU+NPU 阶段必须明确 DMA 与 CPU cache 的一致性策略。
+
+---
+
+## 8. 方案 A：gem5 SimObject wrapper + SystemC NpuTop
+
+### 8.1 方案 A 的核心思想
+
+方案 A 不再把 NPU 当成一个独立 `sc_main()` 程序跑，而是把它做成 gem5 正规组件：
+
+```text
+Python config
+    |
+    | 创建 gem5 SimObject
+    v
+NpuDevice : gem5 SimObject
+    |
+    | C++ 内部持有
+    v
+NpuTop : sc_module
+    |
+    | TLM initiator socket
+    v
+TlmToGem5Bridge64 : gem5 自带桥
+    |
+    | RequestPort
+    v
+membus -> MemCtrl -> DRAM
+```
+
+这样做的好处：
+
+- NPU 能像 CPU、DMA、MemCtrl 一样在 gem5 config 里配置。
+- gem5 统一负责仿真启动、事件推进、stats dump。
+- SystemC 内核仍用 gem5 自带 `SystemC_Kernel`。
+- NPU 内部继续用 SystemC/TLM 写，不需要手写 gem5 `RequestPort` 协议。
+- 以后多个 NPU、不同 array/buffer 配置、不同 workload 都能通过 Python 参数实例化。
+
+### 8.2 最终拓扑
+
+P2 阶段先做 NPU-only：
+
+```text
+Root
+└── System
+    ├── SystemC_Kernel
+    ├── SrcClockDomain / VoltageDomain
+    ├── membus : SystemXBar
+    ├── mem_ctrl : MemCtrl
+    │   └── dram
+    ├── npu : NpuDevice
+    │   └── top : NpuTop(sc_module)
+    │       ├── WorkloadDriver
+    │       ├── PeArray
+    │       ├── OnchipBuffer
+    │       └── DmaEngine.isock
+    └── npu_bridge : TlmToGem5Bridge64
+        ├── tlm  <- bind <- npu.top.dma.isock
+        └── gem5 -> membus.cpu_side_ports
+```
+
+数据流：
+
+```text
+WorkloadDriver
+    -> DmaEngine.issue_read/write()
+    -> tlm_generic_payload
+    -> TlmToGem5Bridge64
+    -> gem5 Request/Packet
+    -> membus
+    -> MemCtrl
+    -> DRAM
+```
+
+### 8.3 建议放置的源码目录
+
+推荐先放在 gem5 源码树内，降低 build/link 复杂度：
+
+```text
+src/dev/npu/
+  NpuDevice.py          # gem5 SimObject 参数定义
+  npu_device.hh         # gem5 C++ SimObject wrapper
+  npu_device.cc
+  npu_top.hh            # SystemC sc_module 顶层
+  npu_top.cc
+  npu_config.hh         # 从原 common.h 拆出的配置/任务结构，可先直接移植
+  dma_engine.hh/.cc
+  onchip_buffer.hh/.cc
+  pe_array.hh/.cc
+  workload_driver.hh/.cc
+  perf_monitor.hh/.cc
+  SConscript
+```
+
+也可以放在：
+
+```text
+src/learning_gem5/npu/
+```
+
+如果目标是长期维护，`src/dev/npu/` 更像正式设备；如果目标是学习实验，
+`src/learning_gem5/npu/` 更轻。
+
+### 8.4 Python SimObject：NpuDevice.py
+
+`NpuDevice.py` 负责暴露 gem5 配置参数。
+
+示意：
+
+```python
+from m5.objects.SystemC import SystemC_ScModule
+from m5.params import *
+
+class NpuDevice(SystemC_ScModule):
+    type = "NpuDevice"
+    cxx_class = "gem5::NpuDevice"
+    cxx_header = "dev/npu/npu_device.hh"
+
+    array_n = Param.Unsigned(16, "Systolic array dimension")
+    buffer_kb = Param.Unsigned(256, "On-chip buffer size in KiB")
+    buf_bw_Bpc = Param.Float(64.0, "On-chip buffer bandwidth in bytes/cycle")
+    dma_outstanding = Param.Unsigned(4, "Max outstanding DMA transactions")
+    data_bytes = Param.Unsigned(1, "Bytes per matrix element")
+
+    gemm_m = Param.Unsigned(512, "GEMM M dimension")
+    gemm_k = Param.Unsigned(512, "GEMM K dimension")
+    gemm_n = Param.Unsigned(512, "GEMM N dimension")
+    double_buffer = Param.Bool(True, "Enable double buffering")
+
+    a_base = Param.Addr(0x10000000, "Input matrix A base address")
+    b_base = Param.Addr(0x20000000, "Input matrix B base address")
+    c_base = Param.Addr(0x30000000, "Output matrix C base address")
+```
+
+注意：如果 `NpuDevice` 继承 `SystemC_ScModule`，它本身就是 gem5 管理的 SystemC 模块。
+这比普通 `SimObject` 内部再手动 new 一个 `sc_module` 更贴近 gem5 的 SystemC 桥接方式。
+
+### 8.5 C++ wrapper：NpuDevice
+
+`NpuDevice` 的职责：
+
+- 从 gem5 参数构造 `NpuConfig` 和 `GemmTask`
+- 创建/持有 NPU 内部模块
+- 暴露 TLM initiator socket，供 Python 侧绑定到 `TlmToGem5Bridge64.tlm`
+- 在仿真结束时输出 NPU 统计，或接入 gem5 stats
+
+示意：
+
+```cpp
+class NpuDevice : public sc_core::sc_module
+{
+  public:
+    tlm_utils::simple_initiator_socket<NpuDevice, 64> dma_socket;
+
+    NpuDevice(const NpuDeviceParams &p,
+              const sc_core::sc_module_name &name);
+
+  private:
+    NpuConfig cfg;
+    GemmTask task;
+
+    std::unique_ptr<OnchipBuffer> buf;
+    std::unique_ptr<DmaEngine> dma;
+    std::unique_ptr<PeArray> pe;
+    std::unique_ptr<WorkloadDriver> drv;
+};
+```
+
+但更干净的做法是让 `NpuDevice` 持有一个 `NpuTop`：
+
+```cpp
+class NpuDevice : public sc_core::sc_module
+{
+  public:
+    tlm_utils::simple_initiator_socket<NpuDevice, 64> dma_socket;
+
+    NpuDevice(const NpuDeviceParams &p,
+              const sc_core::sc_module_name &name)
+      : sc_module(name),
+        dma_socket("dma_socket"),
+        top("top", cfg, task)
+    {
+        top.dmaSocket().bind(dma_socket);
+    }
+
+  private:
+    NpuConfig cfg;
+    GemmTask task;
+    NpuTop top;
+};
+```
+
+实际实现时要注意 socket 方向：`DmaEngine` 是 initiator，`TlmToGem5Bridge64.tlm`
+是 target。`NpuDevice` 如果只是包装 `NpuTop`，可以直接暴露 `NpuTop` 里的 initiator socket，
+不一定需要再包一层 socket。
+
+### 8.6 SystemC 顶层：NpuTop
+
+`NpuTop` 从原 `main.cpp` 中抽出来，删除 `Memory mem` 和 `sc_start()`：
+
+```cpp
+class NpuTop : public sc_core::sc_module
+{
+  public:
+    SC_HAS_PROCESS(NpuTop);
+
+    NpuTop(sc_core::sc_module_name name, NpuConfig cfg, GemmTask task)
+      : sc_module(name),
+        cfg(cfg),
+        task(task),
+        buf("buf", cfg),
+        dma("dma", cfg),
+        pe("pe", cfg),
+        drv("drv", cfg, task, &dma, &buf, &pe)
+    {
+        // 不再 dma.isock.bind(mem.tsock)
+        // 由 gem5 config 把 dma.isock 绑定到 TlmToGem5Bridge64.tlm
+    }
+
+    auto &dmaSocket() { return dma.isock; }
+
+  private:
+    NpuConfig cfg;
+    GemmTask task;
+    OnchipBuffer buf;
+    DmaEngine dma;
+    PeArray pe;
+    WorkloadDriver drv;
+};
+```
+
+独立 `npu_sim` 仍然可以保留，但它应该变成：
+
+```text
+standalone main.cpp
+  NpuTop top
+  Memory mem
+  top.dmaSocket().bind(mem.tsock)
+  sc_start()
+```
+
+gem5 模式则是：
+
+```text
+gem5 config
+  NpuDevice/NpuTop
+  TlmToGem5Bridge64
+  npu.dma_socket <-> bridge.tlm
+  bridge.gem5 -> membus
+```
+
+### 8.7 Python config 绑定方式
+
+示意 config：
+
+```python
+import m5
+from m5.objects import *
+
+system = System()
+system.clk_domain = SrcClockDomain(
+    clock="1GHz", voltage_domain=VoltageDomain()
+)
+system.mem_mode = "timing"
+system.mem_ranges = [AddrRange("1GB")]
+
+system.membus = SystemXBar()
+
+system.mem_ctrl = MemCtrl()
+system.mem_ctrl.dram = DDR3_1600_8x8()
+system.mem_ctrl.dram.range = system.mem_ranges[0]
+system.mem_ctrl.port = system.membus.mem_side_ports
+
+system.systemc_kernel = SystemC_Kernel()
+
+system.npu = NpuDevice(
+    array_n=16,
+    buffer_kb=256,
+    gemm_m=512,
+    gemm_k=512,
+    gemm_n=512,
+    a_base=0x10000000,
+    b_base=0x20000000,
+    c_base=0x30000000,
+)
+
+system.npu_bridge = TlmToGem5Bridge64()
+system.npu_bridge.gem5 = system.membus.cpu_side_ports
+
+# 需要通过 TLM socket 绑定把 npu 的 initiator socket 接到 bridge 的 target socket。
+# 具体语法取决于 NpuDevice.py 暴露的 socket 参数名。
+system.npu.dma = system.npu_bridge.tlm
+
+root = Root(full_system=False, system=system)
+m5.instantiate()
+exit_event = m5.simulate()
+```
+
+这里的关键点：
+
+```text
+NpuDevice 侧暴露 TLM initiator socket
+TlmToGem5Bridge64 侧暴露 TLM target socket
+TlmToGem5Bridge64.gem5 接 membus.cpu_side_ports
+```
+
+### 8.8 SConscript 编译入口
+
+`src/dev/npu/SConscript` 大致需要：
+
+```python
+Import("*")
+
+SimObject("NpuDevice.py", sim_objects=["NpuDevice"])
+
+Source("npu_device.cc")
+Source("npu_top.cc")
+Source("common.cc")
+Source("dma_engine.cc")
+Source("onchip_buffer.cc")
+Source("pe_array.cc")
+Source("workload_driver.cc")
+Source("perf_monitor.cc")
+```
+
+如果使用 gem5 自带 SystemC/TLM 头文件，源码 include 应从：
+
+```cpp
+#include <systemc>
+#include <tlm>
+#include <tlm_utils/simple_initiator_socket.h>
+```
+
+逐步改成 gem5 能找到的头文件路径。优先参考：
+
+```text
+src/systemc/tlm_bridge/
+src/systemc/tests/tlm/
+```
+
+### 8.9 P2 需要先修的 NPU 代码
+
+在接 bridge 之前，先改 NPU 模型本身：
+
+1. `DmaEngine::Transfer` 增加 data buffer：
+
+```cpp
+std::vector<unsigned char> data;
+```
+
+2. `submitTransfer()` 中按 transaction 大小分配：
+
+```cpp
+transfer->data.resize(bytes);
+gp.set_data_ptr(transfer->data.data());
+```
+
+3. 异步 DMA API 加地址参数：
+
+```cpp
+TransferPtr issue_read(uint64_t addr, uint32_t bytes, Kind kind, uint32_t tile_id);
+TransferPtr issue_write(uint64_t addr, uint32_t bytes, Kind kind, uint32_t tile_id);
+```
+
+4. `WorkloadDriver` 增加地址计算：
+
+```cpp
+uint64_t weight_addr(uint32_t i, uint32_t j, uint32_t k);
+uint64_t activation_addr(uint32_t i, uint32_t j, uint32_t k);
+uint64_t output_addr(uint32_t i, uint32_t j);
+```
+
+5. standalone `Memory` 继续保留，但不再是 gem5 模式的内存后端。
+
+### 8.10 分阶段落地 checklist
+
+P1：NPU 代码可嵌入
+
+- [ ] 从 `main.cpp` 抽出 `NpuTop`
+- [ ] standalone `npu_sim` 改成实例化 `NpuTop + Memory`
+- [ ] 修 DMA payload buffer
+- [ ] 修 DMA API 地址参数
+- [ ] `WorkloadDriver` 生成真实 tile 地址
+- [ ] standalone sanity tests 仍通过
+
+P2：gem5 内 NPU-only
+
+- [ ] 新建 `src/dev/npu/`
+- [ ] 新建 `NpuDevice.py`
+- [ ] 新建 `npu_device.hh/.cc`
+- [ ] 新建 `SConscript`
+- [ ] 编译进 `build/X86/gem5.opt`
+- [ ] Python config 创建 `SystemC_Kernel`
+- [ ] Python config 创建 `NpuDevice`
+- [ ] Python config 创建 `TlmToGem5Bridge64`
+- [ ] 绑定 `NpuDevice.dma_socket -> TlmToGem5Bridge64.tlm`
+- [ ] 绑定 `TlmToGem5Bridge64.gem5 -> membus.cpu_side_ports`
+- [ ] 跑 NPU-only GEMM
+- [ ] 从 `stats.txt` 确认 MemCtrl 收到读写请求
+
+P3：CPU + NPU
+
+- [ ] 加 CPU 和 workload
+- [ ] 定义 CPU 通过 MMIO 或 shared memory 启动 NPU 的方式
+- [ ] 明确 CPU/NPU 共享内存一致性策略
+- [ ] 如果非一致性，划 uncached region 或加入 flush/invalidate
+- [ ] 如果走 Ruby coherent，设计 Ruby DMA 接入路径
+- [ ] 对比 CPU-only / NPU-only / CPU+NPU offload
+
+### 8.11 这个方案的边界
+
+方案 A 解决的是：
+
+```text
+怎么把 SystemC/TLM NPU 作为 gem5 设备接进 gem5 memory system
+```
+
+它暂时不解决：
+
+- CPU 如何通过指令真正启动 NPU
+- NPU 寄存器/MMIO programming model
+- CPU cache 与 NPU DMA 的 coherent 语义
+- 多 NPU 之间的仲裁/interconnect
+- 能耗模型
+
+这些应放到 P3/P4，不要压进 P2。P2 的目标很明确：**NPU 的 DMA 请求能真实进入
+gem5 membus/DRAM，并能从 gem5 stats 里看到对应流量和延迟。**
