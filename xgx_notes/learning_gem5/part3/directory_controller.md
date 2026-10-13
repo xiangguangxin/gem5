@@ -8,7 +8,7 @@
 
 ## 目录控制器的双重角色
 
-在 Ruby 里，**目录控制器既是「一致性目录」，又当「内存控制器」用**：
+在本 MSI 示例中，**目录控制器维护一致性状态，并协调内存请求**；它不替代下游 DRAM 控制器的调度与时序模型：
 
 - 存**一致性状态**：这个块当前在哪些缓存里（sharers）、谁是 owner。
 - 直接对接到 gem5 的 `MemCtrl`/DRAM，负责把数据从内存读上来 / 写回去。
@@ -101,3 +101,16 @@ CPU → Load/Store → L1Cache(状态机) → GetS/GetM → Directory(状态机)
 - **cache 控制器**：管理「我这一份块是什么状态」，负责响应 CPU 和目录。
 - **目录控制器**：管理「这个块在整个系统里的分布」，负责仲裁、转发、对接内存。
 - 两者靠 **消息**（GetS/GetM/Data/InvAck/…）通过 Ruby 网络通信。
+
+## 分步练习 R4：目录负责找谁，不替代 DRAM 时序
+
+**重点逻辑：目录根据 sharers/owner 找最新数据与失效对象，并等待内存或缓存响应；内存控制器继续承担存储访问的时序与排队。**
+
+1. **冷读**：找 `{I,S} + GetS → S_m` 与 `S_m + MemData → S`，记录何时加入 sharers、何时返回数据。
+2. **共享转写**：找 `S + GetM → M_m`，列出 `removeReqFromSharers`、`sendInvToSharers`、`setOwner`，与 Cache 侧等待 InvAck 的逻辑对应。
+3. **脏 owner 转共享**：找 `M + GetS → S_D`，继续追 `S_D + Data → SS_m` 与 `SS_m + MemAck → S`。解释目录为什么不能在收到请求时立刻把事务看作完成。
+4. **owner 更换**：找 `M + GetM`，说明转发给旧 owner 与记录新 owner 的关系，区分目录记录更新和请求核真正得到数据/权限的时间。
+
+对每条通路填写：原 sharers/owner → 请求来源 → 发出的消息 → 等待的事件 → 最终 sharers/owner。不要混淆目录的 M 与某个 Cache 的 M：一个是全局管理状态，一个是局部缓存行权限。
+
+**验收**：把 R3 的 CPU0 脏数据交给 CPU1 的路径画成跨模块时序图，Cache、目录、内存分别成一列；每个等待都能指出是谁负责解除。

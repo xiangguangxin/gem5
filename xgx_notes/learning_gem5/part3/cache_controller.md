@@ -99,3 +99,27 @@ transition(I, Load, IS_D) {
 ```
 
 完整协议就是在为「每个 (状态 × 事件) 组合」写迁移规则（原书 Table 8.1 列了全部）。
+
+## 分步练习 R3：先冷读，再写 miss，再考虑竞争
+
+**重点逻辑：瞬态状态表示事务尚未完成；TBE 保存未完成事务的上下文，缓存行保存数据及稳定状态相关信息。**
+
+### 步骤 1：拆开冷读 transition
+
+找到 `transition(I, Load, IS_D)`，逐个解释 `allocateCacheBlock`、`allocateTBE`、`sendGetS`、`popMandatoryQueue`。再找到 `transition(IS_D, {DataDirNoAcks, DataOwner}, S)`，对应写数据、释放 TBE、通知 Sequencer、弹出响应。
+
+画两列：左侧资源分配，右侧资源释放。指出为什么已经把 mandatoryQueue 弹出，CPU 请求仍然可以尚未完成。
+
+### 步骤 2：追写 miss 的两种到达顺序
+
+从 `I + Store → IM_AD` 开始，查 `DataDirAcks`、`InvAck`、`LastInvAck` 对应转移。分别手算“数据先到”和“部分确认先到”，填写 TBE ack 计数变化。不能把“收到数据”直接当成“已经获得写权限”。
+
+### 步骤 3：读已有 M 行的远端请求
+
+查 `FwdGetS/FwdGetM` 的分支，标注数据发给请求核还是目录，原 owner 如何降级或失效。之后到目录笔记核对两个方向的动作能否配对。
+
+### 步骤 4：用 trace 验证
+
+完成[MSI 运行实验](config_and_run.md)后，在 ProtocolTrace 中挑一个行地址，按时间记录 `控制器 / 状态 / 事件 / 下一状态`。随机测试不保证每次都覆盖想要的转移，未出现时扩大测试或编写定向负载，不要伪造预期日志。
+
+**验收**：一份冷读资源表、两种 ack 到达顺序推演、一份实际 trace。先能解释 stall 的必要性，再考虑改动 transition。

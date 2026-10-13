@@ -15,8 +15,8 @@ gem5 有**两套**缓存/内存模型：
 | | classic | Ruby |
 |--|---------|------|
 | 缓存模型 | 手工搭（part1/part2 的 Cache/SimpleCache） | 控制器 + 网络 + 消息 |
-| 一致性 | 简单、单点 | 支持任意协议（MESI/MOESI/MSI…） |
-| 适用 | 单核、简单多核 | 研究一致性协议、互联网络 |
+| 一致性 | 支持基于 snooping 的一致性 | 显式协议状态机（如 MESI/MOESI/MSI） |
+| 适用 | 通用 CPU/设备系统与性能实验 | 研究协议状态、通信与详细网络 |
 
 Ruby 的核心思想：系统由一组 **controller**（L1 缓存、目录、内存控制器）组成，
 它们通过 **network** 互相发**消息**来维护一致性。
@@ -105,3 +105,17 @@ machine(MachineType:L1Cache, "MSI cache")
 - `state_declaration`：稳定态 + 瞬态（带下划线）。
 - `enumeration(Event, ...)`：触发状态迁移的事件。
 - `transition(当前态, 事件, 目标态)`：核心——状态 × 事件 → 新状态 + 动作。
+
+## 分步练习 R2：从请求到状态机，不按文件从头硬读
+
+**重点逻辑：端口请求 → Sequencer → mandatoryQueue → 事件 → transition → action → 消息 → 对端 transition → 返回。**
+
+1. 在 `msi_caches.py` 找 `RubySequencer`、控制器与 `MessageBuffer` 的创建/连接，画对象图。
+2. 在 `MSI-cache.sm` 找 mandatoryQueue 的 `in_port`，看 Load/Store 如何被 `trigger()` 成为事件。
+3. 找 `transition(I, Load, IS_D)`，列出动作及执行顺序；再打开 `sendGetS` 看接收者、消息类型与地址。
+4. 到 `MSI-dir.sm` 找 GetS 对应的 transition，继续追内存响应；最后回到 Cache 的数据返回 transition。
+5. 给每条消息标注使用的 virtual network。多个 vnet 用于分离协议依赖，存在多个 vnet 本身并不能证明没有死锁。
+
+写一张对照表：`当前状态 / 事件 / 下一状态 / 发出消息 / 分配资源 / 释放资源`。只完成冷读通路后，再加写 miss 和所有权转移。
+
+**验收**：不用全文逐行解释，也能指出一笔读 miss 的入口、等待资源、消息方向和完成回调。SLICC 变更需要重新生成并编译模型；Python 连接变更通常只需重新运行。

@@ -60,7 +60,7 @@ root.hello.goodbye_object = GoodbyeObject(buffer_size="100B")
 ## 运行
 
 ```bash
-cd /home/guangxinxiang.linux/github/gem5
+# 在仓库根目录执行
 build/X86/gem5.opt configs/learning_gem5/part2/hello_goodbye.py
 ```
 
@@ -78,3 +78,32 @@ Exiting @ tick 10944163 because Goodbye hello!! Goodbye hello!! Goo…
    直观看到事件的调度与触发过程。
 3. 每次跑完 `m5out/` 下会生成 `stats.txt` / `config.ini` / `config.json`，这是理解
    模拟系统行为的主要输出文件。
+
+## 分步实验 C2：用时间戳证明事件调度
+
+**重点逻辑：事件在未来时间点调用回调；回调可以继续调度事件，也可以通知另一个对象。最终退出是被模型明确安排的动作。**
+
+### 步骤 1：运行带调试的基线
+
+```bash
+build/X86/gem5.opt --outdir=m5out/learning/c2_base --debug-flags=HelloExample --debug-file=events.log configs/learning_gem5/part2/hello_goodbye.py
+rg -n 'Processing|Done firing|Saying goodbye|Scheduling|done copying' m5out/learning/c2_base/events.log
+```
+
+把 Hello 的五次 `Processing the event` 单独抄成时间表。不要把 Goodbye 的同类日志误计为 Hello 触发次数。对照 `startup()` 和 `processEvent()`，确认第一次调度时间和后续相邻事件的间隔。
+
+### 步骤 2：只改变事件次数
+
+复制配置为同目录 `hello_goodbye_lab.py`。保持 `time_to_wait="2us"` 与 Goodbye 参数不变，把 `number_of_fires=5` 改为 `3`，输出到 `c2_count3`。预期 Hello 触发三次，Goodbye 比基线早开始约 4us；不要要求退出 tick 匹配笔记中的历史数字。
+
+### 步骤 3：只改变事件间隔
+
+从基线参数出发，保持五次触发，把 `time_to_wait` 改为 `"1us"`，输出到 `c2_interval1`。预期 Hello 最后一次触发提前约 5us；Goodbye 的填充耗时应保持不变。用日志分别验证“前半段等待”与“后半段填充”，避免只看总时间。
+
+### 步骤 4：分析带宽模型
+
+保持 Hello 不变，给 Goodbye 显式设置 `write_bandwidth="50MiB/s"`，比较基线的 `100MiB/s`。阅读 `fillBuffer()`：每轮复制一段消息，再按 `bandwidth * bytes_copied` 调度下一动作；缓冲保留结尾字符位置，时间换算也可能取整。
+
+预期填充阶段变长，总时间不会简单翻倍。这里 C++ 的 `bandwidth` 使用转换后的时间/字节表示，需要根据参数转换与日志理解，不能按变量名猜量纲。
+
+**验收**：三组单变量结果、Hello 时间表、最后触发/Goodbye 开始/退出的时间线，并解释 `schedule(event, tick)` 的 tick 是绝对时间，而常用 `curTick() + latency` 表达相对等待。
