@@ -17,6 +17,8 @@
 | 9 | 事务桥接 | [SystemC](part4/systemc_integration.md) | `src/systemc/tlm_bridge/` |
 | 10 | 最终项目 | [NPU/DSE](part4/npu_dse.md) | [现有方案](../gem5_npu.md) |
 
+事件机制详解：[事件、调度器与 EventQueue](part2/event_mechanism.md)，整理回调包装、时间推进、链表结构及同组事件的 LIFO 顺序。
+
 Part 2 文件名称保留兼容原链接；`stats_output.md` 主要讲事件和调试，应在端口开发前阅读。真正的统计练习结合 SimpleCache 与实验规范进行。
 
 ## 一致性研究分支

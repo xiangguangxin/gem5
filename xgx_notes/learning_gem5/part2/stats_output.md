@@ -3,6 +3,8 @@
 > 对应源码：`src/learning_gem5/part2/hello_object.{hh,cc}` + `goodbye_object.{hh,cc}` + `HelloObject.py`
 > 配置脚本：`configs/learning_gem5/part2/hello_goodbye.py`
 
+> 原理专题：[gem5 事件机制：时间推进、调度器与队列顺序](event_mechanism.md)。建议先结合本章示例理解事件，再追踪调度器源码。
+
 ## 本章目标
 
 理解 gem5 的**事件驱动(event-driven)**模型、**调试标志(debug flag)**，以及
