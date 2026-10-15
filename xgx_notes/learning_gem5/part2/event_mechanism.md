@@ -364,6 +364,40 @@ if (next) {
 
 事件先从链表移除，之后才执行回调，避免一边作为待执行节点、一边重新入队。
 
+### 用 A、B、C 逐句理解指针赋值
+
+假设 A、B 属于同一个 bin，C 是下一个 bin 的头：
+
+```text
+head、event → A ──nextBin──→ C
+              ↓ nextInBin
+next ───────→ B
+```
+
+执行 `Event *next = head->nextInBin;` 后，`next` 指向 B，不是 A，也不是 C。`next` 是一个局部指针变量；`nextBin` 和 `nextInBin` 是事件对象中的指针成员。
+
+| 语句 | 含义 | 执行后的结果 |
+|---|---|---|
+| `Event *event = head;` | 保存这次要处理的事件 | event 指向 A |
+| `Event *next = head->nextInBin;` | 找同 bin 的后继 | next 指向 B |
+| `next->nextBin = head->nextBin;` | 把 A 的跨 bin 连接交给 B | B 的 nextBin 指向 C |
+| `head = next;` | 让 B 接任队头 | head 指向 B，event 仍指向 A |
+
+这里复制的是指针值，没有复制 C 对象，也没有把 B 变成 C。`head = next` 同样只改变 head 的指向；A 后续仍由 `event->process()` 处理。
+
+为什么还要更新 B 的 nextBin？考虑下面的变化：
+
+```text
+最初：A、B 在同一个 bin，A.nextBin 和 B.nextBin 都指向 C
+后来：在这个 bin 与 C 之间插入新 bin D
+此时：A.nextBin → D → C，但内部节点 B.nextBin 可能仍指向 C
+```
+
+跨 bin 的链表连接只维护在当前 bin 头 A 上。若直接 `head = next`，B 的旧连接可能跳过 D。因此先令 `B.nextBin = A.nextBin`，再换头，才能保留最新的跨 bin 链。
+
+如果 `next == nullptr`，说明 A 是当前 bin 的最后一个事件，便通过 `head = head->nextBin` 直接进入下一个 bin。
+
+
 ### 第三步：跳过作废事件，执行有效事件
 
 ```cpp
@@ -515,3 +549,109 @@ build/X86/gem5.opt --outdir=m5out/learning/event_management \
 此命令验证已有 Hello 示例；上表的取消/改期等场景需要自行实现练习对象，不能期待原示例自动覆盖。让练习最后有明确的退出事件，避免只看到最大 tick。
 
 验收时分别回答：事件是否还在队列？回调是否有效？时间是否推进？事件对象是否仍存活？逐项给出日志或源码依据，而不是只看最终退出时间。
+
+
+## 17. 从事件机制到端口通信：接下来学什么
+
+### 先用日志验证，再进入 SimpleMemobj
+
+建议按下面的顺序完成，而不是继续通读全部调度器内部实现：
+
+1. 运行 Hello/Goodbye 基线，对照 Hello 的 2/4/6/8/10us 时间戳。
+2. 在配置副本中将 Hello 次数改为 3，先预测最后一次触发在 6us，再核对日志。Goodbye 还需要后续事件，所以整个仿真的退出时间会晚于 Hello 最后一次触发。
+3. 完成第 16 节中重新调度、作废、取消和改期的练习，区分队列状态、动作有效性和对象寿命。
+4. 阅读 [SimpleMemobj](simple_memobj.md)，跟通请求、响应和 retry；随后阅读 [SimpleCache](simple_cache.md)，观察事件怎样表达缓存访问延迟。
+
+### 配置脚本、仿真对象与被模拟程序
+
+以下三个文件承担不同角色：
+
+| 文件 | 角色 |
+|---|---|
+| [simple_memobj.py 配置](../../../configs/learning_gem5/part2/simple_memobj.py) | 创建 CPU、SimpleMemobj、总线、内存，连接端口并指定工作负载 |
+| [simple_memobj.cc](../../../src/learning_gem5/part2/simple_memobj.cc) | 实现 SimpleMemobj 的请求转发、响应返回和流量控制 |
+| `tests/test-progs/hello/bin/x86/linux/hello` | 在仿真 CPU 上运行的 x86 可执行程序 |
+
+配置中的 `process.cmd = [binpath]` 指定 hello 程序，`system.cpu.workload = process` 将它设置为 CPU 的工作负载。端口连接则决定 CPU 的取指、数据请求走哪条路径：
+
+```text
+配置脚本创建并连接系统
+    ↓
+仿真 CPU 执行 hello 的机器指令
+    ↓ 取指 / 数据请求
+SimpleMemobj（C++ 对象） → 总线 → 内存
+```
+
+访存请求经过的是 SimpleMemobj 对象，不是重新执行 Python 配置脚本。这个 hello 可执行程序与前文的 HelloObject 事件示例也相互独立。
+
+### 端口方法调用和事件调度怎样配合
+
+SimpleMemobj 的正常请求路径：
+
+```text
+CPUSidePort::recvTimingReq(pkt)
+    → owner->handleRequest(pkt)
+    → memPort.sendPacket(pkt)
+    → sendTimingReq(pkt)
+    → 所连接的下游端口 recvTimingReq(pkt)
+```
+
+响应路径：
+
+```text
+MemSidePort::recvTimingResp(pkt)
+    → owner->handleResponse(pkt)
+    → instPort.sendPacket(pkt) 或 dataPort.sendPacket(pkt)
+    → sendTimingResp(pkt)
+    → CPU 侧接收响应
+```
+
+`owner` 指向拥有端口的 SimpleMemobj。端口负责通信入口、出口和重试，对象负责接受请求、设置 busy 状态及选择返回端口。`RequestPort` 发请求、收响应；`ResponsePort` 收请求、发响应，两者都能发送和接收。
+
+这些端口调用本身不自动安排一个未来事件，也不自动增加仿真时间。`sendTimingReq()` 返回 true 只表示对方接受了请求；事务完成要等后续响应。返回 false 时发送方保留包，等待 retry 通知后重发，不能忙循环尝试发送。
+
+SimpleMemobj 接受请求后直接转发。若要表达“先等待一段延迟再转发”，就需要把前面学的事件机制接进来：
+
+```text
+接受请求并保存包
+    → schedule(转发事件, curTick() + 延迟)
+    → 返回，交还控制权给调度器
+    → 到时执行事件回调
+    → memPort.sendPacket(保存的包)
+```
+
+这期间必须保持相应忙碌状态，避免覆盖尚未转发的请求；向下游发送仍需保留原来的拒绝和 retry 处理。
+
+当前 [SimpleCache::handleRequest()](../../../src/learning_gem5/part2/simple_cache.cc) 就提供了事件与端口配合的实际例子：
+
+```cpp
+schedule(new EventFunctionWrapper([this, pkt]{ accessTiming(pkt); },
+                                  name() + ".accessEvent", true),
+         clockEdge(latency));
+```
+
+它在接受请求后安排未来的缓存访问事件，事件触发时调用 `accessTiming(pkt)`，再判断命中或缺失。这里 latency 按缓存时钟周期解释，`clockEdge(latency)` 给出对应的绝对 tick，不能直接把周期数当作 tick 相加。构造函数中的 true 启用 AutoDelete，这也与 HelloObject 的普通成员事件不同。
+
+## 18. 运行排障：找不到 Python 动态库
+
+如果程序启动时报：
+
+```text
+error while loading shared libraries: libpython3.13.so.1.0:
+cannot open shared object file: No such file or directory
+```
+
+这是动态加载器找不到 gem5 所依赖的库，尚未进入配置脚本，与事件逻辑无关。先检查依赖：
+
+```bash
+ldd build/X86/gem5.opt
+```
+
+本机验证时，缺失的库实际存在于 `/root/miniconda3/lib/libpython3.13.so.1.0`。在当前终端加入搜索路径即可：
+
+```bash
+export LD_LIBRARY_PATH="/root/miniconda3/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+build/X86/gem5.opt --debug-flags=HelloExample configs/learning_gem5/part2/hello_goodbye.py
+```
+
+这是本机路径示例，其他环境应使用实际匹配的库目录。Conda 显示 `(base)` 不保证动态加载器已包含该目录；上述 export 只对当前 shell 及其后续子进程有效。不要将其他 Python 版本的库改名或软链接成 3.13 来替代。
