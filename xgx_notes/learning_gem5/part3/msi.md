@@ -12,15 +12,104 @@
 - **内存何时更新**：写回（write-back）策略下，内存不会随每次 CPU 写入立即更新；更新时机由协议中的写回、flush 或降级等动作决定。
 - **多个核看到旧值怎么办**：靠「基于失效的一致性」把别人的副本标成 I，而不是直接同步新值。
 
-## Way 与 Cache Line
+## Set、Way 与 Cache Line：先看结构图
 
-在组相联缓存里，一个 **Set** 包含多个 **Way**：
+以 **4 个 Set、每组 2 个 Way、每条 Cache Line 的数据大小为 64B** 为例。下图中每一组包含两个槽位，每个槽位保存一条缓存行及其元数据；M/S/I 是示例状态。
 
-- **Way** 是一个「位置 / 槽位」，是缓存行的存放位置。
-- **Cache Line** 是放在这个位置里的**实际数据单元**。
+```mermaid
+flowchart TB
+    addr["CPU 访问地址 A"]
+    index["按地址中的组索引选择 Set 2"]
+    addr --> index
 
-一句话：**Way 是格子，Cache Line 是格子里装的东西**。而每个 Cache Line
-都会带上自己的**一致性状态**（coherence state），例如 MSI 里的 M/S/I。
+    subgraph cache["缓存：4 组 × 2 路 × 64B = 512B 数据容量"]
+        direction TB
+        subgraph s0["Set 0 · 两个槽位"]
+            direction LR
+            s0w0["Way 0 · Cache Line<br/>Tag | S | 数据 64B"]
+            s0w1["Way 1 · Cache Line<br/>Tag | I | 数据空间 64B"]
+            s0w0 ~~~ s0w1
+        end
+        subgraph s1["Set 1 · 两个槽位"]
+            direction LR
+            s1w0["Way 0 · Cache Line<br/>Tag | M | 数据 64B"]
+            s1w1["Way 1 · Cache Line<br/>Tag | S | 数据 64B"]
+            s1w0 ~~~ s1w1
+        end
+        subgraph s2["Set 2 · 本次查找只检查这一组"]
+            direction LR
+            s2w0["Way 0 · Cache Line<br/>Tag | S | 数据 64B"]
+            s2w1["Way 1 · Cache Line<br/>Tag | M | 数据 64B"]
+            s2w0 ~~~ s2w1
+        end
+        subgraph s3["Set 3 · 两个槽位"]
+            direction LR
+            s3w0["Way 0 · Cache Line<br/>Tag | I | 数据空间 64B"]
+            s3w1["Way 1 · Cache Line<br/>Tag | S | 数据 64B"]
+            s3w0 ~~~ s3w1
+        end
+        s0w0 ~~~ s1w0
+        s1w0 ~~~ s2w0
+        s2w0 ~~~ s3w0
+    end
+
+    index --> s2w0
+    index --> s2w1
+    s2w0 --> check["检查有效性和 Tag<br/>匹配则命中；都不匹配则缺失"]
+    s2w1 --> check
+    check --> offset["命中后，按块内偏移访问所需字节<br/>写入还必须获得协议要求的写权限"]
+
+    classDef selected fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#172554;
+    classDef invalid fill:#f1f5f9,stroke:#94a3b8,color:#475569;
+    classDef operation fill:#ecfdf5,stroke:#059669,color:#064e3b;
+    class s2w0,s2w1 selected;
+    class s0w1,s3w0 invalid;
+    class addr,index,check,offset operation;
+    style s2 fill:#eff6ff,stroke:#2563eb,stroke-width:2px
+```
+
+读图时区分三个层次：
+
+| 概念 | 图中对应什么 | 含义 |
+|---|---|---|
+| **Set（组）** | Set 0～3 的分组框 | 地址决定本次访问哪一组 |
+| **Way（路）** | 每组的 Way 0、Way 1 | 每组可选的存放位置；2 路表示每组有 2 个槽位 |
+| **Cache Line（缓存行/块）** | 一个槽位中的块 | 保存一块数据，并关联 Tag、一致性状态等元数据 |
+
+严格说，Way 0 是跨所有 Set 的同一路；说“某组的 Way 0”时，指该路在这个组里的槽位。Cache Line 中文里的“行”指数据块，不等于 Set。
+
+```text
+缓存行数量 = Set 数 × Way 数 = 4 × 2 = 8 条
+数据容量   = Set 数 × Way 数 × Line 数据大小
+           = 4 × 2 × 64B = 512B
+```
+
+容量计算不包含 Tag 和状态位等元数据。I 表示该槽位当前没有可用副本，物理数据空间仍然存在，其中残留的数据不能直接使用。
+
+### 一个地址怎样找到数据
+
+对于常见的按地址位索引、参数为 2 的幂的组相联缓存，地址可理解为：
+
+```text
+┌─────────────────┬──────────────┬──────────────────┐
+│ Tag：识别哪个块  │ Set index    │ Block offset     │
+│                 │ 选择哪一组   │ 选择块内哪个字节  │
+└─────────────────┴──────────────┴──────────────────┘
+```
+
+本例中，4 组需要 2 位组索引，64B 的块需要 6 位块内偏移，其余高位作为 Tag。地址没有“选择 Way”的固定字段，而是在选定 Set 的两路中查找有效且 Tag 匹配的缓存行。
+
+假设 A 映射到 Set 2：它只能放在 Set 2 的 Way 0 或 Way 1。若该组有无效槽位，可用来填充；若两路都有效，就需要在该组内选择牺牲块，即使其他组仍有空位也不能直接使用。命中后还要检查操作权限，例如 MSI 的 S 行可以读，写之前必须获得写权限。
+
+### 与直接映射、全相联的关系
+
+| 组织方式 | Set 与 Way 的关系 | 一个内存块的候选位置 |
+|---|---|---|
+| 直接映射 | 每组只有 1 路 | 指定组的唯一槽位 |
+| N 路组相联 | 每组有 N 路 | 指定组内的 N 个槽位 |
+| 全相联 | 整个缓存只有 1 组 | 整个缓存的所有槽位 |
+
+你前面学习的 SimpleCache 是全相联模型。因此 `[空] [B] [空] [D]` 中，A 从映射规则上可放到任何位置；使用空位无需淘汰，使用 B 或 D 的位置则必须先替换旧块。一般有空位时先使用空位，满了才选择牺牲块。
 
 ## 一致性状态属于 Cache Line
 
