@@ -226,6 +226,157 @@ system  = Param.System(Parent.any, "The system this cache is part of")
 - 通过 `statistics.hh` 里的 `statistics::Scalar` / `Histogram` 暴露统计量，
   模拟结束会写进 `m5out/stats.txt`（如命中数、缺失数、缺失率）。
 
+## 一次访问怎样经历命中、缺失、填充、替换与写回
+
+这五个词不是五种独立的访问模式，而是一次缓存访问中可能出现的判断和动作。
+
+| 概念 | 含义 | 本例对应代码 |
+|---|---|---|
+| 命中（hit） | 所需块已在缓存中，可在本地完成读写 | `accessFunctional()` 返回 true，`accessTiming()` 走 hit 分支 |
+| 缺失（miss） | 所需块不在缓存中，需要向下游访问 | `accessTiming()` 走 miss 分支 |
+| 填充（fill） | 将下游返回的整块数据装入缓存 | `handleResponse()` 调用 `insert(pkt)` |
+| 替换（replacement） | 没有空位时，选择并移除旧块，为新块腾出位置 | `insert()` 的容量判断、随机选块和 `erase()` |
+| 写回（writeback） | 将旧块的数据向下游写出 | `insert()` 创建并发送 `WritebackDirty` 包 |
+
+下面的流程针对普通、需要响应的读写请求；复杂一致性事务不在这个教学模型的覆盖范围内。
+
+```mermaid
+flowchart TD
+    req["CPU 请求到达 handleRequest"] --> busy{"blocked？"}
+    busy -->|是| retry["拒绝接收，等待通知后由上游重试"]
+    busy -->|否| event["设置 blocked，保存请求端口编号<br/>安排缓存访问延迟事件"]
+    event --> lookup["accessTiming → accessFunctional<br/>查找块；命中时完成读或写"]
+    lookup --> hit{"命中？"}
+    hit -->|是| countHit["hits 加一，构造响应"]
+    countHit --> resp["sendResponse → CPU 侧端口<br/>释放处理资源并通知重试"]
+    hit -->|否| countMiss["misses 加一，记录 missTime"]
+    countMiss --> fetch["向下游发送请求<br/>小访问保存 originalPacket，改发整块读请求"]
+    fetch --> returned["收到下游响应 → handleResponse"]
+    returned --> full{"insert：缓存满了吗？"}
+    full -->|是| evict["随机选择旧块<br/>发出写回包，移除旧表项"]
+    full -->|否| fill["分配块空间，登记地址，复制返回数据"]
+    evict --> fill
+    fill --> finish["记录缺失延迟<br/>如有 originalPacket，完成原始读写并构造响应"]
+    finish --> resp
+```
+
+### 1. 命中：在缓存里直接完成访问
+
+`handleRequest()` 接受请求后，先用事件表达缓存访问延迟，再执行 `accessTiming()`：
+
+```cpp
+bool hit = accessFunctional(pkt);
+```
+
+`accessFunctional()` 不只是检查块是否存在：读命中时把所需字节复制到包中，写命中时把包中的数据写入缓存块。命中后执行：
+
+```cpp
+stats.hits++;
+pkt->makeResponse();
+sendResponse(pkt);
+```
+
+这里不需要为该次命中访问下游；也不是没有延迟，因为前面的缓存访问延迟事件已经发生。
+
+### 2. 缺失：保存原请求，必要时读取整块
+
+假设 cache line 为 64B，CPU 要从 `0x1004` 读取 4B，而缓存没有对应块：
+
+```text
+CPU 原始请求：地址 0x1004，大小 4B
+对应缓存块：  地址 0x1000，大小 64B
+```
+
+`accessTiming()` 增加 `stats.misses` 并记录 `missTime`。若请求恰好块对齐且大小为整块，就直接转发原包；否则保存原包并新建整块读包：
+
+```cpp
+originalPacket = pkt;       // 保存 CPU 原始的 4B 请求
+memPort.sendPacket(new_pkt); // 向下游发送 64B 读请求
+```
+
+小块写缺失也先读整块，返回后才修改其中的目标字节，以保留块内其余数据。当前模型不支持跨 cache line 的访问，会检查并报错。
+
+`sendPacket()` 发出请求不等于内存已经完成访问；下游拒收时，端口保存包等待 retry。等待响应期间，缓存保持 blocked。
+
+### 3. 填充：整块回来后，再完成原始小请求
+
+下游响应进入 `handleResponse(pkt)`，其中 pkt 是返回包：
+
+```cpp
+insert(pkt);
+stats.missLatency.sample(curTick() - missTime);
+```
+
+`insert()` 给缓存块分配数据空间、建立块地址到数据指针的映射，并复制返回数据。本例不为填充额外安排延迟。
+
+如果之前保存了 `originalPacket`，就对刚填好的缓存再访问一次：
+
+```cpp
+bool hit = accessFunctional(originalPacket); // 应当命中
+originalPacket->makeResponse();
+delete pkt;                 // 删除临时整块返回包
+pkt = originalPacket;       // 改为返回 CPU 原始请求对应的响应
+originalPacket = nullptr;
+```
+
+原始请求是读，就取出所需的 4B；原始请求是写，就修改对应的字节。最后由 `sendResponse(pkt)` 返回 CPU。这次内部访问不会再增加 hits：CPU 的这次访问已经计作一次 miss，不能同时再算一次 hit。
+
+### 4. 替换与写回：填充时没有空位怎么办
+
+假设缓存只能存 4 个块：
+
+```text
+填充前：[A] [B] [C] [D]
+E 的数据返回，需要填入缓存
+随机选中 B → 将 B 写回下游 → 移除 B → 填入 E
+填充后：[A] [E] [C] [D]
+```
+
+对应 `insert()` 中的操作：
+
+```cpp
+// 满了：选出旧块 block 后，构造写回包
+PacketPtr new_pkt = new Packet(req, MemCmd::WritebackDirty, blockSize);
+new_pkt->dataDynamic(block->second);
+memPort.sendPacket(new_pkt);
+cacheStore.erase(block->first);
+
+// 再为返回的新块建立存储
+uint8_t *data = new uint8_t[blockSize];
+cacheStore[pkt->getAddr()] = data;
+pkt->writeDataToBlock(data, blockSize);
+```
+
+`dataDynamic()` 将旧数据缓冲区交给写回包管理；移除哈希表项不等于旧数据立即消失，写回包仍可携带它。新块则分配独立空间，复制下游返回的数据。
+
+**替换是腾位置，写回是保存被替换块的数据，两者不是同一件事。** 一般写回缓存只需写回脏块，干净块可直接淘汰；本例没有逐块脏位，淘汰时总发写回包。发出写回包也不代表下游已经完成更新。
+
+### 5. 对照统计检查理解
+
+统计声明在 `simple_cache.hh` 的 `SimpleCacheStats` 中，公式及初始化在 `simple_cache.cc` 的同名构造函数中：
+
+```cpp
+statistics::Scalar hits;
+statistics::Scalar misses;
+statistics::Histogram missLatency;
+statistics::Formula hitRatio;
+```
+
+- `hits`、`misses`：在 `accessTiming()` 中按 CPU 请求的首次查找结果增加。
+- `hitRatio`：公式为 `hits / (hits + misses)`；总访问次数为零时不能据此解释命中率。
+- `missLatency`：通过 `sample(curTick() - missTime)` 记录每次缺失的等待时间分布，单位为 tick；不包含发现 miss 之前的缓存访问延迟。
+
+`missLatency.init(16)` 将直方图初始化为 16 个桶，用来汇总不同延迟样本的分布，不是只保存最近一次延迟，也不会给模型额外增加等待时间。
+
+阅读源码时可以沿着这一条链核对：
+
+```text
+handleRequest → 延迟事件 → accessTiming → accessFunctional
+    命中：makeResponse → sendResponse
+    缺失：memPort → 下游响应 → handleResponse → insert
+        → 完成 originalPacket → sendResponse
+```
+
 ## 配置拓扑
 
 ```python

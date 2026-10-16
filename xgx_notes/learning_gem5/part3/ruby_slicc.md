@@ -1,121 +1,351 @@
-# Part 3 · 第 1 章：Ruby、SLICC 与 MSI 协议概述
+# Part 3 · 第 1 章：Ruby、SLICC、消息与虚拟网络
 
-> 对应源码：`src/learning_gem5/part3/`（MSI.slicc / MSI-msg.sm / MSI-cache.sm / MSI-dir.sm）
-> 配置脚本：`configs/learning_gem5/part3/`
+> 前置阅读：[MSI 基础](msi.md)。本文对应当前仓库的教学 MSI 协议，先跟通一笔事务，再深入状态机。
+> 源码入口：[MSI.slicc](../../../src/learning_gem5/part3/MSI.slicc)、[MSI-msg.sm](../../../src/learning_gem5/part3/MSI-msg.sm)、[MSI-cache.sm](../../../src/learning_gem5/part3/MSI-cache.sm)、[MSI-dir.sm](../../../src/learning_gem5/part3/MSI-dir.sm)。
 
-## 本章目标
+## 1. 从 SimpleCache 到 Ruby：多了什么问题
 
-理解 gem5 的 **Ruby** 一致性子系统，用 **SLICC** 语言描述缓存一致性协议，
-以 **MSI** 协议为例走通完整流程。
+Part 2 的 SimpleCache 主要回答“块在不在本地，缺失后如何取回”。多核系统还要回答：其他缓存有没有副本？谁拥有最新数据？写之前要让谁失效？
 
-## 两个内存子系统：classic vs Ruby
+例如 CPU0 和 CPU1 都读过 X，CPU0 随后想写 X。它不能只修改自己的缓存并让 CPU1 继续使用旧副本，而要先通过协议获得写权限。
 
-gem5 有**两套**缓存/内存模型：
+Ruby 是 gem5 的内存系统建模框架，提供控制器、缓存存储、事务接口、消息缓冲和网络等组件，让一致性协议的状态与通信显式进入模型。
 
-| | classic | Ruby |
-|--|---------|------|
-| 缓存模型 | 手工搭（part1/part2 的 Cache/SimpleCache） | 控制器 + 网络 + 消息 |
-| 一致性 | 支持基于 snooping 的一致性 | 显式协议状态机（如 MESI/MOESI/MSI） |
-| 适用 | 通用 CPU/设备系统与性能实验 | 研究协议状态、通信与详细网络 |
+| 模型 | 理解重点 |
+|---|---|
+| Classic caches | 常用于系统建模，支持基于 snooping 的一致性，不代表没有一致性 |
+| Part 2 SimpleCache | 独立教学模型，帮助理解事件、端口和缓存访问，不是完整 Classic Cache |
+| Ruby | 显式建模协议控制器、消息和网络，适合研究一致性及通信行为 |
 
-Ruby 的核心思想：系统由一组 **controller**（L1 缓存、目录、内存控制器）组成，
-它们通过 **network** 互相发**消息**来维护一致性。
+Ruby 不是 MSI 的别名，也不是所有 gem5 仿真都必须使用的组件。MSI 只是 Ruby 中可以实现的一种协议。
 
-## SLICC 是什么
+## 2. 先分清：控制器、消息、网络
 
-**SLICC** = Specification Language for Implementing Cache Coherence。
-一种写一致性协议状态机的 **DSL**，编译时被转成 C++ 类（如 `MSI_L1Cache_Controller`）。
+| 概念 | 回答的问题 | 本例中的对象或内容 |
+|---|---|---|
+| 控制器（controller） | 谁做决定、维护状态？ | L1 Cache Controller、Directory Controller |
+| 消息（message） | 要对哪个块做什么？返回了什么？ | GetS、GetM、Inv、Data、InvAck |
+| 网络（network） | 消息怎样送到目的地？ | 连接各控制器的 Ruby 网络 |
+| 虚拟网络（vnet） | 不同类别的消息怎样分开管理？ | request、forward、response 三类逻辑通道 |
 
-## MSI 协议的文件结构
-
+```mermaid
+flowchart LR
+    cpu["CPU"] <--> seq["Sequencer<br/>CPU 事务接口"]
+    seq <--> cache["L1 Cache Controller<br/>本地缓存行状态与数据"]
+    cache <-->|"协议消息"| net["Ruby 网络<br/>vnet 0 / 1 / 2"]
+    net <-->|"协议消息"| dir["Directory Controller<br/>共享者与拥有者记录"]
+    net <-->|"协议消息"| other["其他 L1 Cache Controller"]
+    dir <-->|"内存请求 / 响应"| mem["内存控制器与 DRAM"]
 ```
-MSI.slicc         协议顶层：声明协议名 + include 下面 3 个 .sm
-  ├─ MSI-msg.sm   消息类型（枚举 + 消息结构体）
-  ├─ MSI-cache.sm L1 缓存控制器状态机（CPU 侧）
-  └─ MSI-dir.sm   目录控制器状态机（内存侧）
+
+图中为逻辑交互，不表示所有连接都是同一种端口，或内存访问也属于这三个协议 vnet。
+
+### dir 是 Directory，不是文件夹
+
+`dir` 是 Directory（目录）的缩写，这里指目录控制器。它按内存块管理记录：
+
+- **Sharers**：哪些缓存持有共享副本。
+- **Owner**：哪个缓存拥有独占的最新数据。
+- **目录状态与未完成事务**：当前如何处理请求，是否还在等待数据或确认。
+
+因此 `cache → dir` 是缓存向目录发消息，`dir → cache` 是目录向缓存发消息。目录记录和协调副本，不代表目录在任何时刻都保存最新数据；最新数据可能在 M 状态的缓存中。
+
+### Sequencer：CPU 请求进入 Ruby 的入口
+
+CPU 仍通过 gem5 的事务接口访问内存系统。Sequencer 将请求接入 Ruby，跟踪事务，并在控制器完成操作后通知 CPU。
+
+本例可先记住：
+
+```text
+CPU 请求 → Sequencer → mandatoryQueue → L1 控制器处理
+L1 控制器完成 → Sequencer 回调 → CPU 收到结果
 ```
+
+`mandatoryQueue` 是 CPU 请求入口，不是第四个协议虚拟网络。
+
+## 3. DSL 和 SLICC 分别是什么
+
+**DSL（Domain-Specific Language）是领域专用语言**，专门表达某个领域的问题。例如 SQL 用于数据库，SLICC 用于缓存一致性控制器。C++ 是通用语言，DSL 则提供更贴近特定问题的语法。
+
+**SLICC（Specification Language for Implementing Cache Coherence）就是 gem5 用来描述一致性状态机的 DSL。** 它描述状态、事件、动作、消息队列和状态转移；构建时生成 C++ 控制器等代码，再编译进 gem5。
+
+```text
+MSI 的 .slicc / .sm 文件
+    → SLICC 编译器
+    → 生成 C++ 控制器等代码
+    → C++ 编译、链接
+    → gem5 运行协议模型
+```
+
+所以：Ruby 是框架，SLICC 是描述语言，MSI 是协议，`.sm` 是协议状态机源码。运行时并不是把 `.sm` 当 Python 脚本逐行解释。
+
+对 ESL 建模而言，先掌握它的表达方式即可：
+
+```text
+当前状态 + 收到的事件 → 执行动作 + 新状态
+```
+
+## 4. 协议文件与配置文件怎样分工
+
+```text
+MSI.slicc          协议入口，组织相关文件
+  ├─ MSI-msg.sm    消息类型和消息字段
+  ├─ MSI-cache.sm  L1 缓存控制器状态机
+  └─ MSI-dir.sm    目录控制器状态机
+
+msi_caches.py      创建控制器、Sequencer、缓存、消息缓冲与网络
+simple_ruby.py     搭建系统并运行 CPU 工作负载
+ruby_test.py       用 Ruby 随机测试器验证协议行为
+```
+
+入口 [MSI.slicc](../../../src/learning_gem5/part3/MSI.slicc) 声明协议并包含相关文件；Python [msi_caches.py](../../../configs/learning_gem5/part3/msi_caches.py) 则实例化生成的控制器并完成连接。
+
+修改 SLICC 需要重新生成、编译模型；修改 Python 连接或参数通常重新运行即可，但必须使用包含对应协议的 gem5 build。构建和运行详见 [config_and_run.md](config_and_run.md)。
+
+## 5. 消息：控制器之间具体传什么
+
+消息可以传请求、控制命令、数据或确认。消息类型不是控制器状态，也不是传输通道。
+
+| 消息类型 | 含义 | 常见方向 / vnet |
+|---|---|---|
+| GetS | 申请数据与读权限；目录也可转发给拥有者 | Cache → Dir：0；Dir → Owner：1 |
+| GetM | 申请数据与写权限；目录也可转发给拥有者 | Cache → Dir：0；Dir → Owner：1 |
+| PutS | 通知目录逐出 S 副本 | Cache → Dir：0 |
+| PutM | 逐出 M 副本并回送脏数据 | Cache → Dir：0 |
+| Inv | 要求缓存使对应块失效 | Dir → Cache：1 |
+| PutAck | 确认逐出请求已处理 | Dir → Cache：1 |
+| Data | 返回块数据 | Dir / Cache → 请求方：2；拥有者也可回送目录 |
+| InvAck | 确认已完成失效 | 被失效 Cache → 请求方 Cache：2 |
+
+### GetS、GetM、PutS、PutM 怎样理解名字
+
+先把名字拆成两部分：**Get 表示申请获得数据或权限，Put 表示归还/释放副本并通知目录；S 和 M 指对应的一致性状态或权限。** 它们是协议消息名，不是 C++ 的读写函数。
+
+| 消息 | 名字中的字母 | 可以理解成对目录说的话 |
+|---|---|---|
+| GetS | S = Shared（共享） | “我要读取这个块，请给我数据和共享读权限。” |
+| GetM | M = Modified（修改） | “我要写这个块，请让我获得写权限。” |
+| PutS | 释放 S 副本 | “我不再保存这个共享副本，请更新共享者记录。” |
+| PutM | 释放 M 副本 | “我要逐出这个已修改的块，这是最新数据，请接手保存责任。” |
+
+GetS 的“共享”表示允许其他缓存也有副本，不代表此时一定有多个副本。GetM 是申请写权限，并不是把 CPU 要写的新值直接发送给目录；数据和必要的失效确认到齐后，请求方才能完成写入。
+
+### PutS：逐出干净副本，主要是通知目录
+
+假设 CPU0、CPU1 都持有 X 的 S 副本，CPU0 的缓存需要腾出位置：
+
+```text
+CPU0 Cache → Directory：PutS(X)，vnet 0
+Directory：根据当前协议状态更新共享者记录
+Directory → CPU0 Cache：PutAck(X)，vnet 1
+CPU0 Cache：按状态机完成逐出，释放对应资源
+```
+
+S 副本是干净的，不需要把数据再写回。当前 `sendPutS` 只构造控制消息，设置 `MessageSizeType:Control`，没有给 `DataBlk` 赋值。**PutS 不是把 CPU 的新写入值写到内存。**
+
+### PutM：逐出脏副本，必须带上最新数据
+
+假设 CPU0 的 X 为 M，缓存值为 20，内存可能仍为 10。此时不能直接丢掉 X：
+
+```text
+CPU0 Cache → Directory：PutM(X, 最新块数据)，vnet 0
+Directory：按协议处理数据回送与拥有者记录
+Directory → CPU0 Cache：PutAck(X)，vnet 1
+CPU0 Cache：按状态机完成逐出
+```
+
+当前 `sendPutM` 明确设置：
 
 ```slicc
-// MSI.slicc
-protocol "MSI";
-include "MSI-msg.sm";
-include "MSI-cache.sm";
-include "MSI-dir.sm";
+out_msg.Type := CoherenceRequestType:PutM;
+out_msg.DataBlk := cache_entry.DataBlk;
+out_msg.MessageSize := MessageSizeType:Data;
 ```
 
-## MSI 的三大稳定状态
+这与 PutS 的核心区别是：PutM 携带整个块的最新数据，以保存尚未写回的修改。PutAck 表示目录完成协议规定的 Put 处理，不应脱离具体转移将它解释为“DRAM 已经物理写入完成”。竞争期间还可能收到转发请求，所以逐出通常经过等待确认的临时状态，不能机械地认为“发出 Put 就立即变 I”。
 
-MSI 是最经典的一致性协议（源自 Sorin et al. 《A Primer on Memory Consistency
-and Cache Coherence》第 8 章）：
+可在 [MSI-cache.sm](../../../src/learning_gem5/part3/MSI-cache.sm) 搜索 `sendPutS`、`sendPutM`、`Replacement`，在 [MSI-dir.sm](../../../src/learning_gem5/part3/MSI-dir.sm) 搜索 `sendPutAck`，对应发送、接收和完成路径。
 
-| 状态 | 含义 | 权限 |
-|------|------|------|
-| **I** (Invalid) | 块不在本缓存 | 无 |
-| **S** (Shared) | 只读，多个缓存可能有同一份 | 只读 |
-| **M** (Modified) | 可读写，本缓存是唯一 owner | 读写 |
+### Owner 是谁：按块记录的拥有者
 
-除了这 3 个**稳定状态**，还有一堆**瞬态状态**（名字带下划线，如 `IS_D`），
-表示「正在从一个稳定态迁移到另一个稳定态、还在等消息」的中间态。
+本教学 MSI 中，Owner 通常指拥有某个块最新数据、持有独占写权限的缓存，对应 M 副本。例如：
 
-## 消息类型（MSI-msg.sm）
+```text
+CPU0 Cache：X 为 M，值 20 ← X 的 Owner
+CPU1 Cache：X 为 I
+内存：X 可能仍为 10
+```
+
+目录记录 Owner 后，便能将其他核对 X 的请求转发给正确的缓存。Owner 是针对一个块，不是说整个缓存被某个 CPU 独占；也不表示数据只存在这一份物理比特，内存中可能仍有旧副本。
+
+扩展到 MOESI 时，O（Owned）副本可以与其他 S 副本共存，因此 Owner 不总意味着独占。这一节的独占解释针对 MSI。
+
+**不能仅凭名字判断 vnet**：PutAck 虽然叫确认，但本例走 forward 网络；PutM 虽携带数据，仍走 request 网络。应看 action 把消息放进哪个输出队列。
+
+[MSI-msg.sm](../../../src/learning_gem5/part3/MSI-msg.sm) 定义了 `RequestMsg` 和 `ResponseMsg`。常用字段包括：
+
+| 字段 | 用途 |
+|---|---|
+| addr | 消息涉及的地址 |
+| Type | GetS、Data 等具体消息类型 |
+| Requestor / Sender | 原始请求方或响应发送者；两者语义不同 |
+| Destination | 消息目的节点集合，可以表达多播 |
+| DataBlk | 数据块；是否有有效数据取决于消息类型 |
+| MessageSize | 网络使用的消息大小类别，不是直接填写字节数 |
+| Acks | ResponseMsg 中的确认计数信息，用于协调写权限 |
+
+`RequestMsg` 不只用于 Cache 发起的请求，也用于目录的转发和控制消息。消息结构中有 DataBlk 字段，不表示每条消息都实际传送整块数据。
+
+## 6. 三个虚拟网络：分离不同类别的协议流量
+
+这个教学 MSI 配置了三个 vnet；这是本协议的选择，不是所有 Ruby 协议的固定要求。
+
+| vnet 编号 | 类型 | 本例的主要流量 |
+|---|---|---|
+| 0 | request | Cache 向目录发送 GetS、GetM、PutS、PutM |
+| 1 | forward | 目录向 Cache 转发 GetS/GetM、发送 Inv/PutAck |
+| 2 | response | 目录或 Cache 返回 Data、Cache 发送 InvAck |
+
+**虚拟网络是逻辑通道，不要求三套独立物理线路。** 不同 vnet 可以共享底层拓扑和链路，利用不同队列及网络资源分离流量。具体缓冲、流控与仲裁由网络实现决定。本例的 `MyNetwork` 使用 `SimpleNetwork`，不能直接套用 Garnet 路由器的全部实现细节。
+
+### MessageBuffer 怎样关联 vnet
+
+在 `MSI-cache.sm` 中：
 
 ```slicc
-enumeration(CoherenceRequestType, ...) {   // cache → dir / dir → cache
-    GetS,    // 请求只读权限
-    GetM,    // 请求读写权限
-    PutS,    // S 态逐出（clean）
-    PutM,    // M 态逐出（dirty，写回）
-    Inv,     // 目录发给缓存：失效请求
-    PutAck,  // 目录确认收到 put
-}
-enumeration(CoherenceResponseType, ...) {
-    Data,    // 带最新数据的响应
-    InvAck,  // 其他缓存确认已失效
-}
+MessageBuffer * requestToDir, network="To", virtual_network="0",
+      vnet_type="request";
+MessageBuffer * forwardFromDir, network="From", virtual_network="1",
+      vnet_type="forward";
+MessageBuffer * responseFromDirOrSibling, network="From",
+      virtual_network="2", vnet_type="response";
 ```
 
-## 三个虚拟网络（virtual network，防死锁）
+`To/From` 是相对于当前控制器而言：
 
-MSI 用 3 个 vnet，**优先级从高到低**：
+```text
+requestToDir：当前 Cache 发往网络，再送到目录
+forwardFromDir：网络送到当前 Cache 的目录控制消息
+responseFromDirOrSibling：当前 Cache 接收目录或其他 Cache 的响应
+```
 
-| vnet | 名称 | 内容 | 优先级 |
-|------|------|------|--------|
-| 0 | request | cache→dir 的请求 | 最低 |
-| 1 | forward | dir→cache 的转发（fwd/inv/putack） | 中 |
-| 2 | response | 响应 | 最高 |
+MessageBuffer 是消息等待处理或发送的队列，vnet 是网络里的逻辑分类，两者不是同一个对象。Python 配置负责创建缓冲并连接网络。
 
-为什么分 vnet：**避免死锁**——响应不能被卡在请求后面。高优先级的响应网络
-永远能先走，不会因为低优先级请求占满缓冲区而饿死。
+### 为什么分开：帮助打破循环等待
 
-## SLICC 语法骨架（先有个印象，后续章节展开）
+危险的情况是：新请求占满资源，而完成旧事务所需的响应也被卡住；旧事务无法完成，资源无法释放，新消息也无法前进。
+
+分开请求、转发和响应，可以避免不同类别不恰当地互相占用资源，为协议设计有向的依赖关系。但**三个 vnet 本身不是无死锁证明**，还需要检查控制器等待、队列、路由和流控资源之间的依赖。
+
+源码注释将响应、转发、请求描述为由高到低的优先层次，可用于理解协议推进关系；不能据此断言“vnet 编号越大在所有网络实现中都严格优先”，或“响应永远先走、不会拥塞、不会饥饿”。死锁、拥塞和饥饿也不是同一个问题。
+
+## 7. SLICC 怎样表达一次状态转移
+
+以下是实际冷读转移的动作列表，省略源码注释：
 
 ```slicc
-machine(MachineType:L1Cache, "MSI cache")
-    : Sequencer *sequencer;       // 机器参数（从 Python 配置注入）
-      MessageBuffer * requestToDir, network="To", virtual_network="0", ...;
-{
-    state_declaration(State, ...) { I, S, M, ... }   // 状态
-    enumeration(Event, ...) { Load, Store, ... }      // 事件
-    structure(Entry, interface="AbstractCacheEntry", ...) { ... }  // 块结构
-    transition(I, Load, IS_D) { ... }                  // 迁移 + 动作
+transition(I, Load, IS_D) {
+    allocateCacheBlock;
+    allocateTBE;
+    sendGetS;
+    popMandatoryQueue;
 }
 ```
 
-- `machine(...)`：声明一个控制器（状态机）。
-- `state_declaration`：稳定态 + 瞬态（带下划线）。
-- `enumeration(Event, ...)`：触发状态迁移的事件。
-- `transition(当前态, 事件, 目标态)`：核心——状态 × 事件 → 新状态 + 动作。
+| 部分 | 含义 |
+|---|---|
+| I | 该块当前没有有效副本 |
+| Load | 控制器识别到 CPU 读事件 |
+| IS_D | 向 S 转移，但尚在等待数据 |
+| allocateCacheBlock | 预留缓存条目 |
+| allocateTBE | 分配未完成事务的临时记录 |
+| sendGetS | 构造消息并放入输出队列 |
+| popMandatoryQueue | 移除已被控制器接手的输入请求，不表示 CPU 读已完成 |
 
-## 分步练习 R2：从请求到状态机，不按文件从头硬读
+TBE（Transaction Buffer Entry）保存事务进行中的临时信息，例如状态、数据或确认计数；不要把它理解为已经完成访问的普通缓存行。
 
-**重点逻辑：端口请求 → Sequencer → mandatoryQueue → 事件 → transition → action → 消息 → 对端 transition → 返回。**
+SLICC 中常见的语法职责：
 
-1. 在 `msi_caches.py` 找 `RubySequencer`、控制器与 `MessageBuffer` 的创建/连接，画对象图。
-2. 在 `MSI-cache.sm` 找 mandatoryQueue 的 `in_port`，看 Load/Store 如何被 `trigger()` 成为事件。
-3. 找 `transition(I, Load, IS_D)`，列出动作及执行顺序；再打开 `sendGetS` 看接收者、消息类型与地址。
-4. 到 `MSI-dir.sm` 找 GetS 对应的 transition，继续追内存响应；最后回到 Cache 的数据返回 transition。
-5. 给每条消息标注使用的 virtual network。多个 vnet 用于分离协议依赖，存在多个 vnet 本身并不能证明没有死锁。
+| 语法 | 作用 |
+|---|---|
+| machine | 定义一种控制器及参数 |
+| state_declaration | 声明稳定状态和临时状态 |
+| enumeration(Event, ...) | 声明状态机事件 |
+| structure | 定义缓存条目、TBE 等结构 |
+| in_port / peek / trigger | 检查输入队列，将消息或请求解码成事件 |
+| action / enqueue | 定义处理动作，必要时构造并发送消息 |
+| transition | 指定状态和事件对应的动作及状态变化 |
 
-写一张对照表：`当前状态 / 事件 / 下一状态 / 发出消息 / 分配资源 / 释放资源`。只完成冷读通路后，再加写 miss 和所有权转移。
+这里的 Load、DataOwner 等是**协议状态机事件**，不等于你在 Part 2 声明的 `EventFunctionWrapper` 对象。底层模拟仍靠 gem5 事件调度推进控制器和网络，但两层概念不能混为一谈。
 
-**验收**：不用全文逐行解释，也能指出一笔读 miss 的入口、等待资源、消息方向和完成回调。SLICC 变更需要重新生成并编译模型；Python 连接变更通常只需重新运行。
+M/S/I 是稳定状态；IS_D、IM_AD 等临时状态表达“已经发请求、还在等数据或确认”。名字中的下划线是本例的命名约定，不是所有协议判断临时状态的通用规则。
+
+## 8. 完整例子：CPU 冷读一个块
+
+假设块 X 在所有 Cache 中都为 I，目录中也没有缓存持有者，最新数据在内存。忽略竞争和替换，只跟踪一次读：
+
+```mermaid
+sequenceDiagram
+    participant CPU
+    participant Seq as Sequencer
+    participant L1 as L1 Controller
+    participant Dir as Directory
+    participant Mem as 内存系统
+    CPU->>Seq: 读取 X
+    Seq->>L1: mandatoryQueue 中的读请求
+    Note over L1: I + Load → IS_D，预留资源
+    L1->>Dir: GetS（vnet 0）
+    Dir->>Mem: 读取 X 所在块
+    Note over Dir: 等待内存响应的临时状态
+    Mem-->>Dir: 块数据
+    Dir-->>L1: Data（vnet 2）
+    Note over L1: 填充数据，IS_D → S，释放 TBE
+    L1-->>Seq: 完成读的回调
+    Seq-->>CPU: 返回读取结果
+```
+
+缓存收到数据后，对应的实际转移是：
+
+```slicc
+transition(IS_D, {DataDirNoAcks, DataOwner}, S) {
+    writeDataToCache;
+    deallocateTBE;
+    externalLoadHit;
+    popResponseQueue;
+}
+```
+
+`Data` 是网络消息类型，而 `DataDirNoAcks`、`DataOwner` 是控制器根据发送者、确认信息等解码出的事件。本例冷读走目录返回数据的路径；从其他拥有者取得数据也可以触发这个转移。
+
+`externalLoadHit` 是通知 Sequencer 完成读的动作名称，不表示这次原本的 miss 应被解释成一次普通本地命中。
+
+## 9. 再看写权限：数据回来不等于可以立即写
+
+假设 CPU0、CPU1 都有 X 的 S 副本，CPU0 要写：
+
+```text
+CPU0 Cache → Directory：GetM，vnet 0
+Directory → CPU1 Cache：Inv，vnet 1
+Directory → CPU0 Cache：Data，vnet 2，附带需要的确认信息
+CPU1 Cache → CPU0 Cache：InvAck，vnet 2
+CPU0 Cache：满足数据和全部必要确认条件后，进入 M 并完成写请求
+```
+
+数据和确认可能以不同顺序到达，所以需要 SM_AD、SM_A 等临时状态和确认计数。目录协调所有权，请求方等待必要条件；不能简单说“目录回了数据，其他副本就一定已失效”。
+
+如果最新数据原本在另一个 M 拥有者中，目录还要向拥有者转发请求，再由拥有者提供最新数据。具体动作在下一章和目录章节追踪。
+
+## 10. 阅读顺序与分步练习 R2
+
+不必一开始逐行通读整个状态机。先完成冷读闭环，再处理写权限和竞争。
+
+1. 在 [msi_caches.py](../../../configs/learning_gem5/part3/msi_caches.py) 找 RubySequencer、控制器、MessageBuffer 和三个 vnet 的配置，画连接图。
+2. 阅读 MSI-msg.sm，区分消息类型、字段和传输通道。
+3. 在 MSI-cache.sm 找 `in_port(mandatory_in, ...)`，看 CPU 请求怎样通过 `trigger()` 解码为 Load/Store。
+4. 找 `transition(I, Load, IS_D)`，再打开 `action(sendGetS, ...)`，确认地址、目的节点、消息类型和输出队列。
+5. 在 MSI-dir.sm 找冷读 GetS 的转移及内存返回处理，再回到 Cache 的 `IS_D → S` 转移。
+6. 整理一张表：`当前状态 / 输入事件 / 动作 / 下一状态 / 消息方向与 vnet / 分配与释放的资源`。
+
+**验收**：能解释 dir、Sequencer、消息、MessageBuffer 和 vnet 的区别；能沿源码跟通一笔冷读，指出等待位置、返回路径和完成回调。先做到这些，再读 [缓存控制器](cache_controller.md) 和 [目录控制器](directory_controller.md)，最后按 [配置运行](config_and_run.md) 验证协议。
+
+对 ESL 建模而言，本章最有价值的是状态机、事务等待与消息交互的表达方式。掌握一条完整路径后就可以迁移到设备模型，不要求先穷尽 Ruby 内部实现。
