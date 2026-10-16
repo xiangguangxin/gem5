@@ -146,6 +146,68 @@ system.cpu.icache_port = system.cache.cpu_side
 system.cpu.dcache_port = system.cache.cpu_side
 ```
 
+### CPU 侧端口：接收请求，返回响应
+
+C++ 的 `CPUSidePort` 继承 `ResponsePort`，因为 Cache 是回应 CPU 请求的一方。`ResponsePort` 表示“负责返回响应的端口”，而不是“接收响应的端口”。
+
+| 方法 | 在 Cache CPU 侧的职责 | 实现关系 |
+|---|---|---|
+| `recvTimingReq(pkt)` | 接收 CPU 发来的请求，交给 Cache 内部处理 | 重写 `ResponsePort` 的虚函数 |
+| `sendPacket(pkt)` | 向 CPU 发送响应，并在发送被拒绝时保存包 | `CPUSidePort` 自己定义的辅助方法 |
+| `sendTimingResp(pkt)` | 将响应传给所连接的 CPU 端口 | 继承自 `ResponsePort` 的发送接口 |
+
+正常路径如下：
+
+```text
+CPU 发请求 → CPUSidePort::recvTimingReq(pkt)
+           → owner->handleRequest(pkt, id)
+           → Cache 处理请求
+           → CPUSidePort::sendPacket(pkt)
+           → sendTimingResp(pkt) → CPU 收到响应
+```
+
+`recvTimingReq()` 返回的 true/false 只表示是否接受本次请求，不是读取的数据或访问完成的响应。实际响应随后通过 `sendTimingResp()` 返回；如果 CPU 暂时拒收，`sendPacket()` 保存响应包，等 `recvRespRetry()` 通知后重发。
+
+对应地，内存侧 `MemSidePort` 继承 `RequestPort`：通过 `sendTimingReq()` 向下游发请求，通过重写的 `recvTimingResp()` 接收下游响应。两个端口都能发送和接收，区别在于请求和响应的方向。
+
+### 内存侧端口：为什么 RequestPort 要重写 recvTimingResp
+
+`MemSidePort` 继承 `RequestPort`，因为它主动向下游发出请求。请求发出后，它还要接收下游返回的响应，因此重写：
+
+```cpp
+bool recvTimingResp(PacketPtr pkt) override;
+```
+
+源码注释 `Receive a timing response from the response port.` 的意思是：**接收来自对端 ResponsePort 的 timing 响应**。其中的 response port 指连接在下游的端口，不是说 MemSidePort 自身继承了 ResponsePort。
+
+```text
+Cache 的 MemSidePort                         下游端口
+    RequestPort                            ResponsePort
+         │                                      │
+         ├── sendTimingReq(pkt) ────────────────→│ recvTimingReq(pkt)
+         │ recvTimingResp(pkt) ←────────────────┤ sendTimingResp(pkt)
+```
+
+在当前示例中，`mem_side` 连接的是总线 `membus.cpu_side_ports`，所以这个对端是总线的 ResponsePort；总线再将请求转发到内存控制器。
+
+MemSidePort 收到响应后，通过 `owner` 把包交给 Cache：
+
+```cpp
+bool SimpleCache::MemSidePort::recvTimingResp(PacketPtr pkt)
+{
+    return owner->handleResponse(pkt);
+}
+```
+
+Cache 再完成填充缓存等处理，并通过 CPU 侧端口返回响应。可以用下面这张表统一记忆两个角色：
+
+| 端口角色 | 请求方向 | 响应方向 |
+|---|---|---|
+| `RequestPort` | 发送请求：`sendTimingReq()` | 接收响应：`recvTimingResp()` |
+| `ResponsePort` | 接收请求：`recvTimingReq()` | 发送响应：`sendTimingResp()` |
+
+**端口名称描述它在事务中的角色；注释里的 from 描述消息来自哪一端。** RequestPort 接收 ResponsePort 发来的响应，正是一次请求与响应交互的正常过程。
+
 ## 关键新概念 2：Param 参数
 
 ```python
