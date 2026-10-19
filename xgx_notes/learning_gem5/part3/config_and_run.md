@@ -208,6 +208,36 @@ DirectoryMemory 保存目录元数据；`self.memory` 接入实际内存组件�
 
 `MyNetwork` 使用 SimpleNetwork，不是 Garnet。它为每个控制器创建一个 Switch，再给每对不同 Switch 建有向内部链路；三个控制器时有三个交换节点、六条有向内部链路。
 
+#### Switch 负责什么
+
+Switch 是网络交换节点，配合链路连接 Cache 控制器和目录控制器，并根据网络路由信息将消息转发到目标。它不保存目录的 Sharers/Owner，也不负责执行 MSI 状态转移。
+
+例如 L1 Cache0 向目录发送 GetS：
+
+```text
+L1 控制器0 → Switch0 → 内部链路 → Switch2 → Directory
+```
+
+本例两个 L1 和一个目录各连接一个 Switch；不同 Switch 之间通过有向链路连接。消息遇到链路或输出资源竞争时可能排队，因此通信耗时不只是控制器自身的延迟。
+
+| 组件 | 决定什么 |
+|---|---|
+| Cache / Directory 控制器 | 发什么消息、发给谁、怎样更新一致性状态 |
+| Switch 与网络链路 | 消息怎样转发到目标，怎样使用传输资源 |
+
+因此“Switch 连接缓存和目录”可以作为直观理解，更完整的路径是“控制器 → 交换节点 → 链路 → 交换节点 → 控制器”。
+
+两句网络配置分别完成：
+
+```python
+self.network.connectControllers(self.controllers) # 创建交换节点和链路，连接控制器
+self.network.setup_buffers()                     # 配置网络内部缓冲
+```
+
+控制器自身的消息队列由前面的 connectQueues 创建；setup_buffers 配置的是 SimpleNetwork 所需的网络内部缓冲，两者配合完成消息传输路径。
+
+#### 系统端口代理与 CPU 正常访存的区别
+
 `network.setup_buffers()` 完成网络缓冲配置。`RubyPortProxy` 接到 `system.system_port`，用于装载程序等 functional 访问；它不是 CPU 正常 timing 访存必须经过的另一个 L1。
 
 `TestCacheSystem` 复用这些核心组件，但将测试器端口接到 Sequencer，并设置测试器相关选项，不能只把 CPU 示例中的 CPU 删除就当作完成测试配置。
