@@ -127,13 +127,25 @@ CPU 示例创建两个 L1 控制器和一个目录控制器：**两种控制器�
 flowchart LR
     c0["CPU0"] <--> s0["Sequencer0"]
     c1["CPU1"] <--> s1["Sequencer1"]
-    s0 <--> l0["L1 Controller0<br/>RubyCache 16KiB，8 路"]
-    s1 <--> l1["L1 Controller1<br/>RubyCache 16KiB，8 路"]
+    subgraph cache0["L1 缓存子系统 0"]
+        q0["mandatoryQueue0<br/>CPU 请求输入队列"] --> l0["L1 Controller0<br/>关联 RubyCache 16KiB，8 路"]
+    end
+    subgraph cache1["L1 缓存子系统 1"]
+        q1["mandatoryQueue1<br/>CPU 请求输入队列"] --> l1["L1 Controller1<br/>关联 RubyCache 16KiB，8 路"]
+    end
+    s0 -->|"提交请求"| q0
+    s1 -->|"提交请求"| q1
+    l0 -->|"完成回调"| s0
+    l1 -->|"完成回调"| s1
     l0 <--> n["SimpleNetwork<br/>3 个 vnet"]
     l1 <--> n
     n <--> d["Directory Controller<br/>DirectoryMemory"]
     d <--> m["MemCtrl + DDR3<br/>或测试路径中的 SimpleMemory"]
 ```
+
+图中的 mandatoryQueue0/1 是为区分两个实例添加的标签；源码中每个 L1 控制器的属性都叫 `mandatoryQueue`。它由 L1 控制器关联，Sequencer 将 CPU 请求提交进去，控制器完成访问后直接通过 Sequencer 回调返回，不是把响应再放回 mandatoryQueue。
+
+`mandatory` 中文是“强制的、必须的”，不是“访存”；这里按用途解释为“CPU 请求输入队列”。名称不代表最高优先级，也不属于网络中的三个 vnet。`popMandatoryQueue` 只表示控制器已接手并移除该输入请求，缺失时仍需等待数据和必要确认。
 
 ### 路径一：CPU 与 L1
 
@@ -180,6 +192,30 @@ CPU 请求读取 X
 
 Sequencer 跟踪 CPU 侧事务，L1 的 TBE 跟踪协议处理中的临时信息，两者不是同一张记录表。GetS/GetM 等协议消息由缓存控制器的动作产生，不能将 Sequencer 简化成“直接把每个 CPU 请求翻译为一条 GetS/GetM”。命中时可能根本不需要发送这类网络消息。
 
+#### Sequencer 和 mandatoryQueue 是什么关系
+
+**Sequencer 是接收、跟踪 CPU 访存请求的组件；mandatoryQueue 是它向 L1 控制器提交请求的输入队列。** 组件负责处理事务，队列负责暂存请求，二者不是同一个对象。
+
+```text
+CPU 发出访存请求
+    ↓
+Sequencer：接收请求，登记未完成事务
+    ↓ 提交请求
+mandatoryQueue：暂存待处理的 CPU 请求
+    ↓
+L1 控制器：根据块状态处理，必要时等待数据或确认
+    ↓ 完成回调
+Sequencer：完成事务跟踪，向 CPU 返回响应
+```
+
+| 对象 | 关联与职责 |
+|---|---|
+| Sequencer | 对接 CPU，跟踪事务，并在访问完成后返回响应 |
+| mandatoryQueue | 关联在 L1 控制器上，由 Sequencer 提交请求，等待控制器处理 |
+| L1 控制器 | 消费请求，执行缓存和一致性状态机，完成后通知 Sequencer |
+
+控制器执行 `popMandatoryQueue` 后，请求虽然已离开输入队列，但若发生缺失，访问还没有完成，Sequencer 仍跟踪原来的 CPU 事务。后续通过完成回调返回结果，**不是将响应重新放进 mandatoryQueue**。队列为空，也不能直接推断没有未完成事务。
+
 ### 路径二：控制器之间的协议消息
 
 `connectQueues()` 创建 MessageBuffer 并接入网络：
@@ -209,6 +245,39 @@ DirectoryMemory 保存目录元数据；`self.memory` 接入实际内存组件�
 `MyNetwork` 使用 SimpleNetwork，不是 Garnet。它为每个控制器创建一个 Switch，再给每对不同 Switch 建有向内部链路；三个控制器时有三个交换节点、六条有向内部链路。
 
 #### Switch 负责什么
+
+**Switch 是当前 Ruby SimpleNetwork 内部的交换节点，控制器是接入网络的端点，链路负责连接节点并传输消息。**
+
+```text
+L1 控制器 → 外部链路 → Switch → 内部链路 → Switch → 外部链路 → 目录控制器
+   端点                交换节点              交换节点                 端点
+```
+
+| 对象 | 在本例中的位置与职责 | Python 创建位置 |
+|---|---|---|
+| Ruby 网络 | 包含交换节点、链路和网络内部缓冲 | `self.network = MyNetwork(self)` |
+| Switch | 网络内部交换节点，转发消息 | `MyNetwork.connectControllers()` 中创建 `self.routers` |
+| 外部链路 | 连接控制器端点与 Switch | `SimpleExtLink(...)` |
+| 内部链路 | 连接不同 Switch | `SimpleIntLink(...)` |
+| L1 / Directory 控制器 | 网络端点，产生消息并执行协议逻辑 | `self.controllers` 中的对象 |
+
+这里“外部链路”的外部，是相对于网络交换结构而言，不表示芯片外部。网络也允许 L1 控制器之间传递数据或确认，不只是 L1 与目录通信。
+
+L1 控制器的完整关系可整理为：
+
+```text
+CPU ↔ Sequencer
+          │ 请求经 mandatoryQueue 进入；完成通过回调返回
+          ↕
+      L1 控制器 ↔ RubyCache（数据和 Tag）
+          ↕ MessageBuffer
+      Ruby 网络（Switch + 链路 + 网络缓冲）
+          ↕
+      目录控制器 ↔ 内存系统
+```
+
+本例目录没有 CPU Sequencer；它连接网络和内存侧。`RubyPortProxy` 是系统加载程序等 functional 访问接入 Ruby 的另一个入口，不位于 L1 与 Switch 之间，也不是网络交换节点。
+
 
 Switch 是网络交换节点，配合链路连接 Cache 控制器和目录控制器，并根据网络路由信息将消息转发到目标。它不保存目录的 Sharers/Owner，也不负责执行 MSI 状态转移。
 

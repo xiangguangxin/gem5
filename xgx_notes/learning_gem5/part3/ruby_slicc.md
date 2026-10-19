@@ -144,6 +144,12 @@ ruby_test.py       用 Ruby 随机测试器验证协议行为
 | Data | 返回块数据 | Dir / Cache → 请求方：2；拥有者也可回送目录 |
 | InvAck | 确认已完成失效 | 被失效 Cache → 请求方 Cache：2 |
 
+### 消息枚举怎样读
+
+`enumeration(CoherenceRequestType, desc="Types of request messages")` 是 SLICC 枚举声明，类似 C++ 的 enum。CoherenceRequestType 是类型名，GetS、PutS 等是可选值，desc 是描述文字，不执行协议动作。真正发送和处理消息要看 action 和 transition。
+
+PutS 注释中的 clean WB 表示干净副本的逐出通知，本例并不携带块数据；PutM 回送最新块数据。Inv 是目录要求缓存使指定副本失效，PutAck 是目录对 Put 处理的确认。它们虽在请求类型枚举中，但不全是 CPU 请求，也不全走 request vnet；Inv、PutAck 走目录到缓存的 forward vnet。
+
 ### GetS、GetM、PutS、PutM 怎样理解名字
 
 先把名字拆成两部分：**Get 表示申请获得数据或权限，Put 表示归还/释放副本并通知目录；S 和 M 指对应的一致性状态或权限。** 它们是协议消息名，不是 C++ 的读写函数。
@@ -169,6 +175,40 @@ CPU0 Cache：按状态机完成逐出，释放对应资源
 ```
 
 S 副本是干净的，不需要把数据再写回。当前 `sendPutS` 只构造控制消息，设置 `MessageSizeType:Control`，没有给 `DataBlk` 赋值。**PutS 不是把 CPU 的新写入值写到内存。**
+
+### PutS 怎样更新共享者名单：删除的是副本关系
+
+假设两个缓存都持有 X 的 S 副本，目录记录：
+
+```text
+CPU0 Cache：X=S
+CPU1 Cache：X=S
+Directory：X 的 Sharers={Cache0, Cache1}
+```
+
+Cache0 需要为新块腾位置，并选择淘汰 X，于是发出 `PutS(X)`。目录处理这条消息，把 Cache0 从 X 的共享者集合移除：
+
+```text
+更新前：Sharers={Cache0, Cache1}
+更新后：Sharers={Cache1}
+```
+
+再返回 PutAck，Cache0 按状态机完成逐出。之后其他核申请写 X 时，目录只需使 Cache1 的副本失效，不必再找 Cache0。若 Cache1 也逐出 X，名单为空，目录可由 S 转为 I。
+
+这里没有 CPU 修改 X，发生的是缓存释放存储位置。**放弃副本不等于删除内存中的 X，也不会删除其他缓存的副本。** Cache0 的对应槽位之后可以用于其他块，原来残留的字节不能再作为 X 的有效副本使用。
+
+组相联缓存通常是目标 Set 没有可用位置时需要替换，不要求整个缓存都满；全相联只有一个组，才可直观理解为整个缓存满了。替换策略决定选择哪个块，PutS/PutM 则负责选择之后的协议交接。
+
+### 淘汰与修改是两回事：PutS 对比 GetM
+
+| 场景 | Cache0 要做什么 | 发送什么 | X 的本地状态路径 |
+|---|---|---|---|
+| 淘汰共享副本 | 不再保存 X，为其他块腾位置 | PutS | S → 等 PutAck 的临时状态 → I |
+| 修改共享副本 | 继续保存 X，并取得写权限 | GetM | S → 等数据和必要确认的临时状态 → M |
+
+**状态属于单个块，不属于整个 Cache。** 正确说法是“Cache0 中的 X 不再处于 S”，而不是“Cache0 不再是共享态”。同一个缓存里的其他块可以分别处于 S、M 或 I。
+
+还有第三种情况：其他缓存申请写 X，目录向 Cache0 发 Inv，Cache0 按协议使自己的 X 副本失效，并向请求方发 InvAck。这是被动失效，与主动逐出发送 PutS 不同。
 
 ### PutM：逐出脏副本，必须带上最新数据
 
