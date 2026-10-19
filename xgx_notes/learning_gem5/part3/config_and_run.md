@@ -143,6 +143,43 @@ flowchart LR
 self.sequencers[i].connectCpuPorts(cpu)
 ```
 
+#### self.sequencers 中的“CPU 接口”是什么意思
+
+Sequencer 是 CPU 接入 Ruby 的中间组件，不是 CPU 本身，也不只是一个端口。它接收访存请求、跟踪未完成事务，并在缓存控制器完成访问后向 CPU 返回响应。
+
+`self.sequencers` 是这些组件的列表，本例每个 CPU 创建一个：
+
+```text
+CPU0 ↔ self.sequencers[0] ↔ L1 控制器0
+CPU1 ↔ self.sequencers[1] ↔ L1 控制器1
+```
+
+创建代码中的参数分别建立这些关联：
+
+```python
+RubySequencer(
+    version=i,                                # 编号
+    dcache=self.controllers[i].cacheMemory,    # 对应 L1 的缓存存储
+    clk_domain=self.controllers[i].clk_domain, # 对应时钟域
+    ruby_system=self,                          # 所属 Ruby 系统
+)
+```
+
+虽然参数叫 dcache，本例使用的是统一的指令/数据 L1。创建 Sequencer 后，还要将 L1 控制器的 `sequencer` 属性指向它，并通过 `connectCpuPorts(cpu)` 接入 CPU 端口；创建对象和连接组件是不同步骤。
+
+一次读缺失的配合过程是：
+
+```text
+CPU 请求读取 X
+ → Sequencer 接收并跟踪请求
+ → 请求进入 L1 的 mandatoryQueue
+ → L1 控制器发送 GetS，等待数据
+ → 数据返回，L1 完成处理并通知 Sequencer
+ → Sequencer 向 CPU 返回结果
+```
+
+Sequencer 跟踪 CPU 侧事务，L1 的 TBE 跟踪协议处理中的临时信息，两者不是同一张记录表。GetS/GetM 等协议消息由缓存控制器的动作产生，不能将 Sequencer 简化成“直接把每个 CPU 请求翻译为一条 GetS/GetM”。命中时可能根本不需要发送这类网络消息。
+
 ### 路径二：控制器之间的协议消息
 
 `connectQueues()` 创建 MessageBuffer 并接入网络：
