@@ -21,6 +21,74 @@ CPU → Sequencer → L1 控制器
 
 **目录不是所有最新数据的仓库。** 块处于 M 时，最新数据可以在某个 L1 Cache，目录保存的是寻找它所需的记录。
 
+### 用一个块的经历理解“目录管理”
+
+目录管理就是**按块记录谁持有副本、谁拥有独占最新数据，并协调权限交接**。先假设只有两个 CPU，块 X 最初不在任何缓存中。下面每一步都等待事务完成后再进行下一步，暂不考虑竞争。
+
+| 阶段 | Cache0 中的 X | Cache1 中的 X | 目录稳定记录 | 数据情况 |
+|---|---|---|---|---|
+| 初始 | I | I | I，无 Sharer、无 Owner | 最新数据在内存 |
+| CPU0 读取 | S | I | S，Sharers={Cache0} | 干净副本与内存一致 |
+| CPU1 读取 | S | S | S，Sharers={Cache0, Cache1} | 两个共享副本 |
+| CPU0 写入完成 | M | I | M，Owner={Cache0} | Cache0 最新，内存可能过期 |
+| CPU1 再读，降级与回写完成 | S | S | S，Sharers={Cache0, Cache1} | 两个干净共享副本 |
+
+#### 场景一：读取后登记共享者
+
+```text
+Cache0 → Directory：GetS(X)
+Directory：检查 X 的记录，发现没有缓存持有它
+Directory → 内存：读取 X 所在块
+Directory → Cache0：Data
+事务完成后：Cache0 的 X 为 S，目录记录 Sharers={Cache0}
+```
+
+随后 Cache1 也读取 X，本例目录在 S 状态仍向内存读取并返回数据，登记第二个共享者。这里“登记”是修改 X 的目录项，不是向文件写日志。
+
+#### 场景二：有人要写，先协调其他副本失效
+
+```text
+Cache0 → Directory：GetM(X)，申请写权限
+Directory → Cache1：Inv(X)，要求副本失效
+Directory → Cache0：Data，携带必要确认数量
+Cache1 → Cache0：InvAck(X)，确认自己的副本已失效
+Cache0：数据与必要确认满足后，完成写入并进入 M
+```
+
+数据与确认可能按不同顺序到达，图中顺序只是便于阅读。稳定下来后，目录记录 Owner={Cache0}、Sharers 为空。目录负责找到要失效的缓存，请求方缓存负责协调收到的数据和确认；不能说目录先收齐所有 InvAck 再授予数据。
+
+#### 场景三：内存可能旧了，先找 Owner
+
+假设 Cache0 已将 X 改为 20，内存可能还是 10。Cache1 再读 X 时：
+
+```text
+Cache1 → Directory：GetS(X)
+Directory → Cache0：转发 GetS，原始请求方是 Cache1
+Cache0 → Cache1：最新 Data
+Cache0 → Directory：最新 Data，用于更新内存
+Cache0：M → S
+Directory：协调回写，完成后稳定在 S，记录两个 Sharer
+```
+
+请求方拿到数据与目录完成内存回写是不同阶段。这里没有要求先将主存更新，再由请求方重新读取主存；拥有者可以直接供数。
+
+### 目录记录怎样驱动源码
+
+目录对每个块使用同一套规则，不为 X、Y 各写一份状态机：
+
+```text
+队列消息带有块地址 X
+ → in_port 将消息解码为事件
+ → trigger(Event:GetS, X)
+ → 框架查询 X 的当前目录状态
+ → 匹配 transition(当前状态, GetS, 下一状态)
+ → action 更新 X 的记录并发送相应消息
+```
+
+例如 X 为 I 时，GetS 匹配 `transition({I, S}, GetS, S_m)`；内存响应到达后触发 MemData，再匹配 `transition(S_m, MemData, S)`。trigger 提供“哪个块、发生什么事”，transition 定义“这种状态下怎么处理”。
+
+这就是目录管理的核心：**保存副本关系，依据状态和消息选择动作，等待必要条件后继续推进。** 它不管理 CPU 寄存器，也不代替 DRAM 的时序调度；本例还没有目录侧 TBE，不能把 L1 的内部结构直接搬过来。
+
 ### Cache 与目录控制器的职责对照
 
 **Cache 管“我保存的数据和权限”，目录管“同一个块在各个 Cache 之间的副本关系”。**

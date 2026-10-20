@@ -265,6 +265,30 @@ LastInvAck：最后一个必要失效确认到达时识别出的状态机事件
 
 PutAck 确认的则是逐出请求的协议处理，不能将它等同于“CPU 读写完成”或“DRAM 已经物理写入完成”。**读到 Ack 时，先问：谁在确认、确认了什么、发给谁？**
 
+### InvAck 实例：目录发失效命令，缓存之间直接确认
+
+`InvAck` 拆开是 Invalidation Acknowledgement，即“失效确认”。Ack 本身只表示确认，前面的 Inv 才指定确认的是副本失效。
+
+假设 Cache0 和 Cache1 都有 X 的 S 副本，现在 CPU0 要修改 X：
+
+```mermaid
+sequenceDiagram
+    participant C0 as Cache0（申请写权限）
+    participant D as Directory
+    participant C1 as Cache1（持有共享副本）
+    C0->>D: GetM(X)，申请写权限（vnet 0）
+    D->>C1: Inv(X)，要求副本失效（vnet 1）
+    Note over C1: 按协议将自己的 X 副本失效
+    C1-->>C0: InvAck(X)，确认已失效（vnet 2）
+    Note over C0: 取得数据并收齐必要确认后，才能完成写入
+```
+
+这里省略数据返回路径，专门展示失效和确认。**本例 InvAck 通过 Ruby 网络直接从被失效的 Cache1 发给请求方 Cache0，不需要目录转发。** 目录在 Inv 消息中指定 Requestor，让接收方知道向谁发送确认。
+
+失效的是 Cache1 中 X 的副本，不是内存中的块，也不是 Cache0 即将使用的数据。失效不要求把槽位里的字节立即清零；即使还有残留内容，也不能将它作为 X 的有效数据读取。
+
+如果多个缓存需要失效，每个相关缓存按协议返回确认，请求方结合目录提供的计数信息跟踪必要确认。InvAck 不携带最新块数据，也不表示 CPU 写入已经完成；数据可独立通过 Data 消息到达，两者顺序不保证一致。
+
 ### Owner 是谁：按块记录的拥有者
 
 本教学 MSI 中，Owner 通常指拥有某个块最新数据、持有独占写权限的缓存，对应 M 副本。例如：
