@@ -1,0 +1,18 @@
+test_checks_must_not_mutate (test_codex_team.RunnerTests.test_checks_must_not_mutate) ... ok
+test_design_review_checks_plan_not_unimplemented_files (test_codex_team.RunnerTests.test_design_review_checks_plan_not_unimplemented_files) ... ok
+test_failed_checks_never_verify (test_codex_team.RunnerTests.test_failed_checks_never_verify) ... ok
+test_nonzero_client_persisted (test_codex_team.RunnerTests.test_nonzero_client_persisted) ... [1] design: cto
+ok
+test_out_of_scope_stops (test_codex_team.RunnerTests.test_out_of_scope_stops) ... ok
+test_readonly_role_change_rejected_even_inside_scope (test_codex_team.RunnerTests.test_readonly_role_change_rejected_even_inside_scope) ... [1] review: red-team
+ok
+test_result_fail_closed (test_codex_team.RunnerTests.test_result_fail_closed) ... ok
+test_state_outside_workspace (test_codex_team.RunnerTests.test_state_outside_workspace) ... ok
+test_task_validation (test_codex_team.RunnerTests.test_task_validation) ... ok
+test_timeout (test_codex_team.RunnerTests.test_timeout) ... ok
+test_verifier_receives_host_baseline_and_fingerprints (test_codex_team.RunnerTests.test_verifier_receives_host_baseline_and_fingerprints) ... ok
+
+----------------------------------------------------------------------
+Ran 11 tests in 0.313s
+
+OK

@@ -1,116 +1,98 @@
+// Host contract: args object, async agent(prompt, options), log(message).
+// This is a workflow-host script, not a standalone Node CLI. See ../references/team-contract.md.
 export const meta = {
   name: 'agent-team',
-  description: '用 cto / red-team / tech-writer / developer / verifier 团队开发，对抗评审与验证门禁硬性内置',
-  phases: [
-    { title: '设计' },
-    { title: '文档' },
-    { title: '实现' },
-    { title: '验证' },
-  ],
+  description: '顺序交接的团队流程；空结果、未通过评审和无证据验证均不放行',
+  phases: [{title:'设计'}, {title:'文档'}, {title:'实现'}, {title:'验证'}],
 }
 
-// 结构化输出，用于驱动闸门回环（机器可读的 verdict）
 const REVIEW_SCHEMA = {
-  type: 'object',
-  properties: {
-    verdict: { type: 'string', enum: ['approve', 'needs_fix'] },
-    findings: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          severity: { type: 'string' },
-          issue: { type: 'string' },
-          trigger: { type: 'string' },
-          suggestion: { type: 'string' },
-        },
-        required: ['severity', 'issue'],
-      },
-    },
-  },
-  required: ['verdict', 'findings'],
+  type:'object',
+  properties:{
+    verdict:{type:'string', enum:['approve','needs_fix']},
+    findings:{type:'array', items:{type:'object', properties:{
+      severity:{type:'string', enum:['P0','P1','P2','P3']},
+      issue:{type:'string'}, trigger:{type:'string'}, suggestion:{type:'string'},
+      location:{type:'string'}, evidence:{type:'string'},
+    }, required:['severity','issue','trigger','suggestion']}},
+  }, required:['verdict','findings'],
 }
-
 const VERIFY_SCHEMA = {
-  type: 'object',
-  properties: {
-    verdict: { type: 'string', enum: ['pass', 'fail'] },
-    evidence: { type: 'string' },
-    issues: { type: 'array', items: { type: 'string' } },
-  },
-  required: ['verdict', 'evidence'],
+  type:'object', properties:{
+    verdict:{type:'string', enum:['pass','fail']}, evidence:{type:'string'},
+    issues:{type:'array', items:{type:'string'}},
+  }, required:['verdict','evidence','issues'],
 }
-
 const MAX_ROUNDS = 3
-const requirement = (args && args.requirement) || '（未指定需求）'
-const findingsText = (fs) => (fs || []).map((f) => `${f.severity || '?'}: ${f.issue}`).join('\n')
-
-// ── 设计：cto → red-team 闸门（不过就回 cto 修订） ──
-let architecture = await agent(
-  `分析需求并产出架构方案 + 任务清单（含约束、待决策、风险）：\n${requirement}`,
-  { label: 'cto: 架构方案', phase: '设计', agentType: 'cto' }
-)
-
-let archOk = false
-for (let i = 0; i < MAX_ROUNDS && !archOk; i++) {
-  const review = await agent(
-    `对抗评审下面这份架构方案，找缺陷与失败模式。\n\n${architecture}\n\n评审结论：verdict=approve（无显著缺陷）或 needs_fix（有必须修复的缺陷）。`,
-    { label: `red-team: 攻架构 #${i + 1}`, phase: '设计', agentType: 'red-team', schema: REVIEW_SCHEMA }
-  )
-  if (!review || review.verdict === 'approve') {
-    archOk = true
-    log('✅ 架构评审通过')
-  } else {
-    log(`❌ 架构评审不通过（第 ${i + 1} 轮）：\n${findingsText(review.findings)}`)
-    architecture = await agent(
-      `按评审意见修订架构方案，逐条回应缺陷：\n\n缺陷清单：\n${findingsText(review.findings)}\n\n原方案：\n${architecture}`,
-      { label: 'cto: 修订架构', phase: '设计', agentType: 'cto' }
-    )
-  }
+const input = typeof args === 'object' && args ? args : {}
+const requirement = typeof input.requirement === 'string' ? input.requirement.trim() : ''
+let architecture = null, design = null, code = null, verification = null
+const history = []
+const finish = (done, status, reason) => ({requirement, architecture, design, code,
+  verification, history, done, status, reason})
+if (!requirement) return finish(false, 'invalid_input', '缺少具体 requirement，不派发任务')
+if (typeof agent !== 'function' || typeof log !== 'function') {
+  throw new Error('Workflow host must supply agent() and log()')
 }
-
-// ── 文档 ──
-const design = await agent(
-  `把下面这份架构方案写成设计文档，接口必须具体到可编码：\n\n${architecture}`,
-  { label: 'tech-writer: 设计文档', phase: '文档', agentType: 'tech-writer' }
-)
-
-// ── 实现 + 验证：developer → red-team 闸门 → verifier 门禁（失败回环，反馈回灌） ──
-let code = null
-let feedback = ''
-let done = false
-for (let round = 0; round < MAX_ROUNDS && !done; round++) {
-  const feedbackNote = feedback ? `\n\n上一轮评审的缺陷清单（必须修复）：\n${feedback}` : ''
-  code = await agent(
-    `按设计文档实现代码 + 单测（TDD），小步提交：\n\n${design}${feedbackNote}`,
-    { label: `developer: 实现 #${round + 1}`, phase: '实现', agentType: 'developer' }
-  )
-
-  const codeReview = await agent(
-    `对抗评审下面这份实现，找缺陷与失败模式。\n\n${code}\n\n评审结论：verdict=approve 或 needs_fix。`,
-    { label: `red-team: 攻代码 #${round + 1}`, phase: '实现', agentType: 'red-team', schema: REVIEW_SCHEMA }
-  )
-  if (codeReview && codeReview.verdict === 'needs_fix') {
-    feedback = findingsText(codeReview.findings)
-    log(`❌ 代码评审不通过（第 ${round + 1} 轮）：\n${feedback}`)
-    continue
-  }
-
-  const verify = await agent(
-    `实际运行 build/测试并评审下面这份代码，产出带真实输出的验证报告。\n\n设计：\n${design}\n\n代码：\n${code}\n\n结论：verdict=pass（build+测试通过）或 fail（列出问题清单）。`,
-    { label: `verifier: 验证 #${round + 1}`, phase: '验证', agentType: 'verifier', schema: VERIFY_SCHEMA }
-  )
-  if (verify && verify.verdict === 'pass') {
-    done = true
-    log(`✅ 验证通过。证据：\n${verify.evidence}`)
-  } else {
-    feedback = ((verify && verify.issues) || ['验证失败，无问题清单']).join('\n')
-    log(`❌ 验证不通过（第 ${round + 1} 轮）：\n${feedback}`)
-  }
+const context = JSON.stringify({requirement, scope:input.scope || [],
+  acceptance:input.acceptance || [], constraints:input.constraints || []}, null, 2)
+const dispatch = async (role, phase, task, schema) => {
+  const prompt = `原始任务与边界（每轮保留）：\n${context}\n\n${task}\n\n遵循 .claude/references/team-contract.md；工具可用性与用户授权由宿主执行。不要自行提交推送。`
+  return await agent(prompt, {label:`${role}: ${phase}`, phase, agentType:role, ...(schema ? {schema} : {})})
 }
-
-if (!done) {
-  log(`⚠️ 达到最大轮次 ${MAX_ROUNDS}，仍未通过，停止并交人工处理。`)
+const artifact = x => typeof x === 'string' ? x.trim().length > 0
+  : !!x && typeof x === 'object' && Object.keys(x).length > 0
+const findingsText = fs => fs.map(f => JSON.stringify(f)).join('\n')
+function reviewError(r) {
+  if (!r || !['approve','needs_fix'].includes(r.verdict) || !Array.isArray(r.findings)) return '评审结果缺失或格式无效'
+  if (r.findings.some(f => !f || !['P0','P1','P2','P3'].includes(f.severity)
+      || ['issue','trigger','suggestion'].some(k => typeof f[k] !== 'string' || !f[k].trim()))) return '缺陷记录无效'
+  if (r.verdict === 'needs_fix' && !r.findings.length) return '要求修复但没有具体问题'
+  if (r.verdict === 'approve' && r.findings.some(f => ['P0','P1'].includes(f.severity))) return '评审声称通过但仍有阻断缺陷'
+  return null
 }
-
-return { requirement, architecture, design, code, done }
+try {
+  architecture = await dispatch('cto','设计','给出需求理解、验收映射、备选与推荐、文件范围、风险和可执行任务。缺少关键决定时明确标出，不虚构批准。')
+  if (!artifact(architecture)) return finish(false,'invalid_result','架构产物为空')
+  let archOk = false
+  for (let round=0; round<MAX_ROUNDS; round++) {
+    const r = await dispatch('red-team','设计',`评审架构：\n${JSON.stringify(architecture)}\n输出 approve 或 needs_fix；允许无缺陷，不为反对而反对。`,REVIEW_SCHEMA)
+    const error = reviewError(r)
+    history.push({phase:'design_review',round:round+1,result:r})
+    if (error) return finish(false,'invalid_result',error)
+    if (r.verdict === 'approve') { archOk=true; break }
+    if (round+1 < MAX_ROUNDS) {
+      architecture = await dispatch('cto','设计',`修订原方案并逐条说明处理：\n${JSON.stringify(architecture)}\n缺陷：\n${findingsText(r.findings)}`)
+      if (!artifact(architecture)) return finish(false,'invalid_result','修订架构为空')
+    }
+  }
+  if (!archOk) return finish(false,'needs_revision','架构评审达到轮数上限，不进入实现')
+  design = await dispatch('tech-writer','文档',`把已评审方案整理为足够实施的文档，沿用指定路径，不要求机械新增 docs 文件：\n${JSON.stringify(architecture)}`)
+  if (!artifact(design)) return finish(false,'invalid_result','设计文档产物为空')
+  let feedback = ''
+  for (let round=0; round<MAX_ROUNDS; round++) {
+    code = await dispatch('developer','实现',`按设计完成任务，返回文件清单、行为和验证记录。按改动选择必要测试，不为纯文档制造单测。\n设计：${JSON.stringify(design)}\n上一轮完整反馈：${feedback}`)
+    if (!artifact(code)) return finish(false,'invalid_result','实现产物为空')
+    const review = await dispatch('red-team','实现',`基于实际文件/diff 复查实现，不只信开发者摘要：\n${JSON.stringify(code)}\n设计：${JSON.stringify(design)}`,REVIEW_SCHEMA)
+    const error = reviewError(review)
+    history.push({phase:'implementation_review',round:round+1,result:review})
+    if (error) return finish(false,'invalid_result',error)
+    if (review.verdict === 'needs_fix') { feedback=findingsText(review.findings); continue }
+    verification = await dispatch('verifier','验证',`按原始验收独立检查实际产物，选择与改动相关的验证；列命令、退出码、关键输出、未运行项及理由。缺工具或测试失败不能伪造通过。\n设计：${JSON.stringify(design)}\n实现：${JSON.stringify(code)}\n评审：${JSON.stringify(review)}`,VERIFY_SCHEMA)
+    history.push({phase:'verification',round:round+1,result:verification})
+    if (!verification || !['pass','fail'].includes(verification.verdict)
+        || typeof verification.evidence !== 'string' || !verification.evidence.trim()
+        || !Array.isArray(verification.issues) || verification.issues.some(x => typeof x !== 'string')) {
+      return finish(false,'invalid_result','验证结果缺失、无证据或格式无效')
+    }
+    if (verification.verdict === 'pass' && verification.issues.length === 0) {
+      log('验证报告通过；请依据命令与输出核对证据。未自动提交、合并或推送。')
+      return finish(true,'verified','已通过本次验收与评审')
+    }
+    feedback = JSON.stringify(verification)
+  }
+  return finish(false,'needs_revision','实现或验证达到轮数上限；保留问题及证据，停止自动回环')
+} catch (error) {
+  log(`团队流程停止：${String(error)}`)
+  return finish(false,'execution_error',String(error))
+}

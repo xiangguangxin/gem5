@@ -1,0 +1,6 @@
+{
+  "requirement": "Fix cache_address.split_address(address, size, assoc, line_size) in the supplied fixture. Return a dictionary with tag, index and offset for power-of-two set-associative caches. Reject negative/non-integer addresses, nonpositive/non-integer geometry, non-power-of-two line size or set count, and sizes not divisible by assoc*line_size with ValueError. Preserve tests. Write a brief DESIGN.md explaining mapping and validation. Use the existing tests to demonstrate failure before repair and success afterward.",
+  "scope": ["cache_address.py", "DESIGN.md"],
+  "acceptance": ["All supplied unittest cases pass", "No files other than cache_address.py and DESIGN.md change", "DESIGN.md explains mapping and validation"],
+  "checks": [["python3", "-m", "unittest", "-v", "test_cache_address.py"]]
+}

@@ -1,0 +1,77 @@
+--- /dev/null
++++ after/DESIGN.md
+@@ -0,0 +1,52 @@
++# Cache address mapping
++
++`split_address(address, size, assoc, line_size)` splits a byte
++address into the tag, set index, and byte offset of a set-associative cache.
++`size` is cache data capacity in bytes, `assoc` is the number of ways per set,
++and `line_size` is bytes per cache line. The result is a new dictionary with
++keys `tag`, `index`, and `offset` and integer values; no input is mutated.
++
++## Mapping
++
++The mapping arithmetic is:
++
++```text
++sets   = size // (assoc * line_size)
++block  = address // line_size
++tag    = block // sets
++index  = block % sets
++offset = address % line_size
++```
++
++For power-of-two line size and set count, offset occupies the lowest
++`log2(line_size)` address bits, index the next `log2(sets)` bits, and tag the
++remaining bits. A single set has index zero and uses no index bits.
++Associativity determines the set count; this function does not select a way.
++No fixed address width is imposed.
++
++For example, capacity 16384 bytes, two ways, and 64-byte lines give 128 sets.
++Address `0x1044` maps to `{'tag': 0, 'index': 65, 'offset': 4}`.
++
++## Validation
++
++Before mapping, the implementation rejects each invalid input with
++`ValueError`, in this order:
++
++1. Require all four arguments to be integers, explicitly excluding `bool`.
++2. Require `address >= 0` and positive `size`, `assoc`, and `line_size`.
++3. Require `line_size` to be a power of two.
++4. Require `size` to be divisible by `assoc * line_size`.
++5. Compute `sets` and require it to be a positive power of two.
++
++A positive integer `n` is a power of two when `n & (n - 1) == 0`.
++Associativity itself need not be a power of two. Validating before division
++prevents invalid geometry from leaking `ZeroDivisionError`.
++
++## Verification
++
++[test_cache_address.py](test_cache_address.py) supplies reference mappings,
++single-set boundaries, and invalid-input cases. Its contents are preserved.
++Run from the workspace using argv
++`["python3", "-B", "-m", "unittest", "-v", "test_cache_address.py"]`.
++`-B` prevents bytecode cache files. Before repair, this suite ran three tests
++and reported nine failures and four errors (exit code 1).
+--- before/cache_address.py
++++ after/cache_address.py
+@@ -1,4 +1,17 @@
+ def split_address(address, size, assoc, line_size):
+-    # Deliberately broken fixture for the end-to-end repair example.
++    """Return tag, set index, and byte offset for a valid cache geometry."""
++    if any(not isinstance(value, int) or isinstance(value, bool)
++           for value in (address, size, assoc, line_size)):
++        raise ValueError('address and cache geometry must be integers')
++    if address < 0 or size <= 0 or assoc <= 0 or line_size <= 0:
++        raise ValueError('address must be nonnegative and geometry positive')
++    if line_size & (line_size - 1):
++        raise ValueError('line_size must be a power of two')
++    if size % (assoc * line_size):
++        raise ValueError('size must be divisible by assoc * line_size')
+     sets = size // (assoc * line_size)
+-    return {'tag': address // line_size, 'index': address % sets, 'offset': 0}
++    if sets <= 0 or sets & (sets - 1):
++        raise ValueError('set count must be a positive power of two')
++    block = address // line_size
++    return {'tag': block // sets, 'index': block % sets,
++            'offset': address % line_size}

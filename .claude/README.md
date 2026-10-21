@@ -19,8 +19,10 @@
 ```
 .claude/
 ├── agents/          # Claude Code 原生 subagent（cto / red-team / tech-writer / developer / verifier）
-├── skills/          # 可被 Claude Code 加载的标准 skill（<名字>/SKILL.md）
-├── workflows/       # 确定性编排脚本（agent-team.js，内置审核闸门）
+├── skills/          # 项目技能（<名字>/SKILL.md）
+├── references/      # 团队协作契约
+├── integrations/    # 可选工具接入与来源说明
+├── workflows/       # 宿主编排模板与模拟测试（不自带 Agent 执行器）
 └── README.md        # 本索引
 ```
 
@@ -63,7 +65,7 @@ Requirement
     +-- pass --> finish-development-branch 收尾
 ```
 
-编排协议详见 [skills/subagent-driven-development/SKILL.md](skills/subagent-driven-development/SKILL.md)。确定性编排（硬性审核闸门）见 [workflows/agent-team.js](workflows/agent-team.js)。
+编排协议详见 [skills/subagent-driven-development/SKILL.md](skills/subagent-driven-development/SKILL.md)。可选宿主编排模板（结果门禁）见 [workflows/agent-team.js](workflows/agent-team.js)。
 
 ---
 
@@ -115,3 +117,18 @@ Requirement
 - 普通 gem5 C++/SLICC 源码解释仍使用仓库阅读流程，图形输出交给 technical-diagrams。
 - 本地环境检查：`python3 .claude/integrations/rea/check_environment.py`。
 - Skill 文件已纳入仓库，不代表 Node、分析引擎或 MCP 已安装连接。项目 local-scope 接入方式见集成说明，不自动改全局客户端设置。
+
+## 团队协作的执行约定
+
+[team-contract.md](references/team-contract.md) 统一任务输入、角色边界、交接格式、P0～P3 问题分级、修复回环和分级验证。角色不是字数越多越好：每次任务必须给出上下文、文件范围和验收，下游必须实际使用上游产物。
+
+现有 agent-team.js 是需要宿主注入 agent/args/log 的流程模板，不是独立启动器；现另有 [Codex CLI 执行适配器](workflows/README.md)，可在独立工作区运行真实闭环；JS 模板自身仍不自带宿主。它现在对空评审、无证据验证及架构评审超限拒绝放行；脚本不能替代真实执行证据。模拟测试：`node .claude/workflows/tests/agent-team.test.mjs`。
+
+简单文档任务走相应角色和检查，不机械触发五角色完整链路。没有独立 Agent 能力时说明顺序执行，不能把提示文件存在说成团队已经运行。提交与远程推送仍遵循用户授权。
+
+
+## 真实客户端任务闭环
+
+[workflows/codex-team.py](workflows/codex-team.py) 使用已登录的 Codex CLI 顺序运行五角色，保存结构化报告和日志，并由主进程独立执行任务验收。包含可复制的故障 fixture 和无需模型的回归测试。运行、权限边界及限制见 [使用说明](workflows/README.md)。
+
+真实运行证据：[2026-10-21 Codex 闭环验收](workflows/evidence/2026-10-21-codex/README.md)，包含失败基线、最终通过输出、文件指纹与修复补丁。
