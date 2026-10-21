@@ -677,6 +677,80 @@ while (true) {
 
 源码位于 [eventq.cc](../../../src/sim/eventq.cc) 的 `EventQueue::serviceOne()`。它处理一个队头事件，调用方负责保证队列非空。
 
+### 先看整体：一次调用只处理一个队头事件
+
+serviceOne 不会自己循环处理整个队列，而是把一个事件取出并处理后返回。外层 doSimLoop 再决定是否继续调用。
+
+```text
+serviceOne（调用方保证队列非空）：
+    按队列锁机制进入受保护作用域
+    event = 当前 head
+    next = event 的同 bin 后继
+    清除 event 的 Scheduled 标记
+
+    如果 next 存在：
+        next 继承旧组头的 nextBin
+        head = next
+    否则：
+        head = 旧组头的 nextBin
+
+    如果 event 未作废：
+        当前队列时间 = event 的触发时间
+        按需打印执行日志
+        调用 event.process()
+        如果是退出事件：
+            检查对应生命周期约束
+            返回 event，不走下面普通路径的 release
+    否则：
+        不执行回调，不通过这个事件更新时间
+        清除 Squashed 标记
+
+    event.release()，按生命周期规则处理
+    返回空指针
+```
+
+返回非空事件表示遇到有效退出事件；返回空指针表示此次没有返回退出事件，不表示队列已经空了。
+
+```mermaid
+flowchart TD
+    start["保存队头 event，清除 Scheduled"] --> pop["维护 nextInBin / nextBin<br/>将本次事件出队"]
+    pop --> valid{"事件未作废？"}
+    valid -->|是| time["setCurTick(event.when)<br/>调用 process 执行业务回调"]
+    valid -->|否| clear["清除 Squashed<br/>跳过执行和时间更新"]
+    time --> exit{"是退出事件？"}
+    exit -->|是| ret["返回 event 给外层循环"]
+    exit -->|否| release["release 生命周期处理"]
+    clear --> release
+    release --> null["返回空指针，外层通常继续"]
+```
+
+### setCurTick：直接更新仿真时间，不是现实等待
+
+```cpp
+setCurTick(event->when());
+```
+
+when() 返回事件预定的绝对 tick，setCurTick 把当前 EventQueue 的时间更新到这个值。例如当前为 2us，下一个有效事件在 5us，调度器直接更新到 5us，再调用回调，不逐 tick 执行空操作，也不让宿主机实际等待 3us。
+
+```text
+之前：getCurTick() = 2us
+队头：event.when() = 5us
+更新：getCurTick() = 5us
+回调：此时观察 curTick()，得到 5us 对应的 tick
+```
+
+同 tick 的多个事件执行时，时间可以保持不变。正常事件循环保证事件不在过去；多队列并行时，这里更新的是所属队列时间，不能简单理解成一个不加同步的全局时钟被任意线程修改。
+
+与插入路径连起来看：
+
+```text
+schedule 设置事件何时触发
+ → insert 按时间与优先级排序
+ → serviceOne 取出事件
+ → setCurTick 更新到事件时间
+ → process 执行回调，回调还可再次 schedule
+```
+
 ### 第一步：锁住队列并记住当前事件
 
 ```cpp
