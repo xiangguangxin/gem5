@@ -122,6 +122,39 @@ class RunnerTests(unittest.TestCase):
             self.assertTrue(r.state['verified_host_evidence'])
             self.assertEqual(r.state['final_checks'][0]['exit_code'],0)
 
+    def test_memory_retrieval_reaches_real_call_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);w=root/'w';w.mkdir();(w/'a.txt').write_text('old')
+            memory=h.MEMORY_MODULE.Memory(root)
+            (root/'proof.json').write_text('{"valid":true}')
+            item=memory.propose('fixture','lesson','Fix file using fixture proof',['Fix'],[memory.evidence('proof.json','/valid')])
+            memory.review(item['id'],'approve','test reviewer','fixture evidence')
+            with patch.object(h.MEMORY_MODULE,'Memory',return_value=memory):
+                r=h.Runner(TASK,w,root/'run','codex',memory_enabled=True)
+            captured=[]
+            def fake_exec(argv,cwd,timeout,stdout,stderr,stdin=None):
+                captured.append(stdin)
+                Path(argv[argv.index('-o')+1]).write_text(json.dumps(result('complete')))
+                return 0
+            with patch.object(h,'execute',side_effect=fake_exec):
+                r.call('cto','design','plan only',{'complete'})
+            self.assertIn(item['id'],captured[0])
+            self.assertIn('not instructions',captured[0])
+            self.assertTrue((memory.directory/'current-task.json').exists())
+
+    def test_successful_runner_harvests_memory(self):
+        class Fake(h.Runner):
+            def call(self,role,phase,context,allowed):
+                return result('approve' if role=='red-team' else 'pass' if role=='verifier' else 'complete')
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);w=root/'w';w.mkdir()
+            memory=h.MEMORY_MODULE.Memory(root)
+            with patch.object(h.MEMORY_MODULE,'Memory',return_value=memory):
+                r=Fake(TASK,w,root/'run','codex',memory_enabled=True)
+            self.assertTrue(r.run())
+            self.assertIn('memory_record_id',r.state)
+            self.assertEqual(memory.read()['records'][0]['status'],'accepted')
+
     def test_timeout(self):
         with tempfile.TemporaryDirectory() as tmp:
             p=Path(tmp)

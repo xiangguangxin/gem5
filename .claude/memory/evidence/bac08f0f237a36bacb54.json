@@ -1,0 +1,42 @@
+{
+  "done": true,
+  "status": "verified",
+  "final_exit_codes": [
+    0
+  ],
+  "initial_snapshot": {
+    "cache_address.py": "3293cc7fd51db04638082a1eb0d700dd3b4c2c83757d9651cb06b1243b9eb8e7",
+    "test_cache_address.py": "48c4b081ed56563ef5c464b325edb017d328e41094e5525f8fb18451128a1c8f"
+  },
+  "final_snapshot": {
+    "DESIGN.md": "7ead4259b68b8b67b55b408d9301d2ebc1300ddf4431e83888a6ee7b8e501bfd",
+    "cache_address.py": "6d8f7a2aa4febf10293040e4757b7639e5770fbfdec51acb064c2f15b2d2038f",
+    "test_cache_address.py": "48c4b081ed56563ef5c464b325edb017d328e41094e5525f8fb18451128a1c8f"
+  },
+  "phase_verdicts": [
+    {
+      "phase": "design",
+      "verdict": "complete"
+    },
+    {
+      "phase": "design-review",
+      "verdict": "approve"
+    },
+    {
+      "phase": "documentation",
+      "verdict": "complete"
+    },
+    {
+      "phase": "implementation",
+      "verdict": "complete"
+    },
+    {
+      "phase": "code-review",
+      "verdict": "approve"
+    },
+    {
+      "phase": "verification",
+      "verdict": "pass"
+    }
+  ]
+}

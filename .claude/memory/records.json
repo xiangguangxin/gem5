@@ -1,0 +1,139 @@
+{
+  "version": 1,
+  "records": [
+    {
+      "key": "run/bac08f0f237a36bacb54",
+      "scope": "project",
+      "kind": "fact",
+      "statement": "运行记录 bac08f0f237a36bacb54：宿主记录为 verified；1 条最终验收命令退出码均为 0。仅适用于该次记录，不代表所有任务正确。",
+      "tags": [
+        "harness",
+        "verified",
+        "验收"
+      ],
+      "evidence": [
+        {
+          "path": ".claude/memory/evidence/bac08f0f237a36bacb54.json",
+          "sha256": "4e22b21ae44d34359d8d3d70f496a7872bb00dcf9f9ec0554d285e13c3c15991",
+          "pointer": "/status",
+          "value": "verified"
+        },
+        {
+          "path": ".claude/memory/evidence/bac08f0f237a36bacb54.json",
+          "sha256": "4e22b21ae44d34359d8d3d70f496a7872bb00dcf9f9ec0554d285e13c3c15991",
+          "pointer": "/final_exit_codes",
+          "value": [
+            0
+          ]
+        }
+      ],
+      "id": "9107ad24c334be918eb7",
+      "status": "accepted",
+      "created": "2026-10-21T09:11:46.522040+00:00",
+      "updated": "2026-10-21T09:11:46.556460+00:00",
+      "review": {
+        "reviewer": "host-field-validator",
+        "reason": "Statement is generated only from verified host status and exit-code fields; no semantic claims inferred.",
+        "verdict": "approve",
+        "at": "2026-10-21T09:11:46.556441+00:00"
+      }
+    },
+    {
+      "key": "harness.design-review-stage",
+      "scope": "project",
+      "kind": "lesson",
+      "statement": "harness 的设计评审应审查方案是否覆盖已知缺陷，不应要求实现尚未开始时测试已经通过；该经验来自本项目 fixture 闭环，推广到其他流程前需复核。",
+      "tags": [
+        "harness",
+        "verifier",
+        "design",
+        "证据",
+        "评审"
+      ],
+      "evidence": [
+        {
+          "path": ".claude/workflows/evidence/2026-10-21-codex/result.json",
+          "sha256": "fa065409ac9aa0f6a6af4f7660bcfbc3354c1a301447110ae90000d16dde8692",
+          "pointer": "/earlier_attempts/0/outcome",
+          "value": "operator stopped after design review treated known baseline failures as missing implementation; stage-specific review prompt corrected"
+        }
+      ],
+      "id": "295c8df9b5d3c1850ca7",
+      "status": "accepted",
+      "created": "2026-10-21T09:11:46.600589+00:00",
+      "updated": "2026-10-21T09:13:41.942126+00:00",
+      "review": {
+        "reviewer": "codex-cli:01a15dbb-2129-7111-a5ff-a13a1b9e2b2a; receipt=.claude/memory/evidence/2026-10-21-lesson-review.json",
+        "reason": "源文件 SHA256 和 /earlier_attempts/0/outcome 均匹配；最终 design-review 也明确只评审方案覆盖情况，将实现与测试通过留给后续验收。陈述限定于本项目 fixture，并要求推广前复核，范围适当。",
+        "verdict": "approve",
+        "at": "2026-10-21T09:13:41.942111+00:00"
+      }
+    },
+    {
+      "key": "harness.verifier-evidence-handoff",
+      "scope": "project",
+      "kind": "lesson",
+      "statement": "harness 向独立 verifier 交接时，应提供修复前的宿主测试输出及初始/当前文件指纹，才能核对失败基线与测试未修改；该经验限于需要这类验收证据的任务。",
+      "tags": [
+        "harness",
+        "verifier",
+        "design",
+        "证据",
+        "评审"
+      ],
+      "evidence": [
+        {
+          "path": ".claude/workflows/evidence/2026-10-21-codex/result.json",
+          "sha256": "fa065409ac9aa0f6a6af4f7660bcfbc3354c1a301447110ae90000d16dde8692",
+          "pointer": "/earlier_attempts/1/outcome",
+          "value": "verifier rejected missing baseline output and initial fingerprints; host baseline collection and evidence handoff added"
+        }
+      ],
+      "id": "66155ab3febcc15aad7f",
+      "status": "accepted",
+      "created": "2026-10-21T09:11:46.646357+00:00",
+      "updated": "2026-10-21T09:13:41.967931+00:00",
+      "review": {
+        "reviewer": "codex-cli:01a15dbb-2129-7111-a5ff-a13a1b9e2b2a; receipt=.claude/memory/evidence/2026-10-21-lesson-review.json",
+        "reason": "源文件 SHA256 和 /earlier_attempts/1/outcome 均匹配；最终 verification 记录使用宿主失败基线及初始、当前指纹核对测试未变。陈述限定于需要此类验收证据的任务，未泛化为所有交接的通用要求。",
+        "verdict": "approve",
+        "at": "2026-10-21T09:13:41.967920+00:00"
+      }
+    }
+  ],
+  "audit": [
+    {
+      "at": "2026-10-21T09:11:46.522064+00:00",
+      "id": "9107ad24c334be918eb7",
+      "event": "proposed"
+    },
+    {
+      "at": "2026-10-21T09:11:46.556462+00:00",
+      "id": "9107ad24c334be918eb7",
+      "event": "accepted",
+      "reason": "Statement is generated only from verified host status and exit-code fields; no semantic claims inferred."
+    },
+    {
+      "at": "2026-10-21T09:11:46.600612+00:00",
+      "id": "295c8df9b5d3c1850ca7",
+      "event": "proposed"
+    },
+    {
+      "at": "2026-10-21T09:11:46.646390+00:00",
+      "id": "66155ab3febcc15aad7f",
+      "event": "proposed"
+    },
+    {
+      "at": "2026-10-21T09:13:41.942129+00:00",
+      "id": "295c8df9b5d3c1850ca7",
+      "event": "accepted",
+      "reason": "源文件 SHA256 和 /earlier_attempts/0/outcome 均匹配；最终 design-review 也明确只评审方案覆盖情况，将实现与测试通过留给后续验收。陈述限定于本项目 fixture，并要求推广前复核，范围适当。"
+    },
+    {
+      "at": "2026-10-21T09:13:41.967933+00:00",
+      "id": "66155ab3febcc15aad7f",
+      "event": "accepted",
+      "reason": "源文件 SHA256 和 /earlier_attempts/1/outcome 均匹配；最终 verification 记录使用宿主失败基线及初始、当前指纹核对测试未变。陈述限定于需要此类验收证据的任务，未泛化为所有交接的通用要求。"
+    }
+  ]
+}

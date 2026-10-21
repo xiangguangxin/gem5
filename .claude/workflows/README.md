@@ -70,16 +70,24 @@ python3 .claude/workflows/codex-team.py \
 
 日志可能含源码或环境相关信息，发布前人工审查。客户端错误或超时时不会当作通过；超时/中断会终止本次进程组，保留工作区供检查。state 记录用于审计，当前**没有断点自动恢复**；不要直接用同一 output 重跑，也不要误称可续跑。
 
+## 有证据的项目记忆
+
+命令行默认在任务开始检索相关已审查记录，在运行中保存短期检查点，并在 verified 后采集有限的验收事实。经验结论先成为候选，经语义评审才能用于后续任务；来源文件改变后自动排除旧记录。使用 `--no-memory` 关闭本次记忆读写。
+
+存储格式、命令、冲突处理及适用边界见 [项目记忆说明](../memory/README.md)，提炼流程见 [project-memory Skill](../skills/project-memory/SKILL.md)。本机制不自动改写角色、技能或权限规则。
+
 ## 运行器回归测试
 
 不调用模型的自动测试：
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
-  -s .claude/workflows/tests -p 'test_codex_team.py' -v
+  -s .claude/workflows/tests -p 'test_*.py' -v
 ```
 
 覆盖输入和输出校验、越界修改、日志位置、失败验收阻断、客户端错误、验收修改工作区和超时。包含基线失败→修复后成功→独立验证交接的证据链回归。这些测试与真实客户端验收分开报告。
+
+记忆测试覆盖候选隔离、证据失效、重复提议、冲突与退役、损坏文件保护，以及运行器检索和采集接入。
 
 原有 `agent-team.js` 仍是 JavaScript 宿主模板，没有自动套用 Python 适配器。两者使用相同团队原则，但不是共享实现；修改后各自运行回归，不能用一个的结果证明另一个正确。
 

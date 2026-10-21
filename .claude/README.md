@@ -132,3 +132,8 @@ Requirement
 [workflows/codex-team.py](workflows/codex-team.py) 使用已登录的 Codex CLI 顺序运行五角色，保存结构化报告和日志，并由主进程独立执行任务验收。包含可复制的故障 fixture 和无需模型的回归测试。运行、权限边界及限制见 [使用说明](workflows/README.md)。
 
 真实运行证据：[2026-10-21 Codex 闭环验收](workflows/evidence/2026-10-21-codex/README.md)，包含失败基线、最终通过输出、文件指纹与修复补丁。
+
+
+## 有证据的项目记忆
+
+[project-memory Skill](skills/project-memory/SKILL.md) 管理事实、设计决策和经验的候选提炼、证据核对与评审入库。存储格式、生命周期和操作见 [记忆指南](memory/README.md)。Codex Harness 已接入有界检索、阶段检查点与成功运行的字段级事实采集，可用 --no-memory 关闭。语义经验仍需提议和评审，不自动改写核心规则。

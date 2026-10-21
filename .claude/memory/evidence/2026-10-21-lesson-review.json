@@ -1,0 +1,24 @@
+{
+  "client": "Codex CLI",
+  "session_id": "01a15dbb-2129-7111-a5ff-a13a1b9e2b2a",
+  "exit_code": 0,
+  "date": "2026-10-21",
+  "candidate_sha256": "14a5326991fb0106ed98362387cc0ce736360300609bc249c20e2fda8d83d428",
+  "candidate_ids": [
+    "295c8df9b5d3c1850ca7",
+    "66155ab3febcc15aad7f"
+  ],
+  "reviews": [
+    {
+      "id": "295c8df9b5d3c1850ca7",
+      "verdict": "approve",
+      "reason": "源文件 SHA256 和 /earlier_attempts/0/outcome 均匹配；最终 design-review 也明确只评审方案覆盖情况，将实现与测试通过留给后续验收。陈述限定于本项目 fixture，并要求推广前复核，范围适当。"
+    },
+    {
+      "id": "66155ab3febcc15aad7f",
+      "verdict": "approve",
+      "reason": "源文件 SHA256 和 /earlier_attempts/1/outcome 均匹配；最终 verification 记录使用宿主失败基线及初始、当前指纹核对测试未变。陈述限定于需要此类验收证据的任务，未泛化为所有交接的通用要求。"
+    }
+  ],
+  "scope": "Independent read-only semantic review of two historical project lessons. No global truth or identity attestation."
+}
