@@ -297,6 +297,11 @@ head
 
 ### bin、nextBin 与 nextInBin 的区别
 
+![事件队列两层连接：nextBin 跨组，nextInBin 组内](images/event_queue_bins.svg)
+
+蓝色箭头连接各组的头事件，绿色箭头连接同组事件。SVG 可放大查看；图中的箭头表示当前连接，LIFO 指同组新事件插入时压到组头，并不是按事件字母排序。
+
+
 **一个 bin 对应相同触发时间 when、相同优先级 priority 的一组事件。** 只有时间相同还不够，优先级不同也属于不同 bin。这里的 bin 是逻辑分组，主队列中没有必须单独创建的 Bin 容器对象，而是由 Event 自身的指针组织。
 
 | 指针 | 连接范围 | 指向什么 | 用途 |

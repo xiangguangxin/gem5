@@ -170,6 +170,28 @@ CPU 发请求 → CPUSidePort::recvTimingReq(pkt)
 
 对应地，内存侧 `MemSidePort` 继承 `RequestPort`：通过 `sendTimingReq()` 向下游发请求，通过重写的 `recvTimingResp()` 接收下游响应。两个端口都能发送和接收，区别在于请求和响应的方向。
 
+### 为什么 cpu_side 返回数据，却不是 RequestPort
+
+`cpu_side` 表示缓存朝向 CPU 的一侧：它接收 CPU 的取指、读写请求，并向 CPU 返回数据或完成响应。
+
+**RequestPort 与 ResponsePort 按“谁发起请求”区分，不是按“谁发送数据”区分。** 两种端口都能发送和接收，只是承担的事务角色不同。
+
+```text
+CPU 的 RequestPort                  缓存 cpu_side 的 ResponsePort
+        │                                       │
+        ├── 请求：“读取地址 X” ────────────────→│ recvTimingReq(pkt)
+        │←─ 响应：“这是 X 的数据” ──────────────┤ sendTimingResp(pkt)
+```
+
+| 一端 | 发出的内容 | 接收的内容 | 端口角色 |
+|---|---|---|---|
+| CPU | 取指、读取、写入等请求 | 数据或完成响应 | RequestPort |
+| 缓存 cpu_side | 数据或完成响应 | CPU 请求 | ResponsePort |
+
+返回数据是对原请求的回应，不是重新发起请求，因此缓存向 CPU 发送数据时仍使用 ResponsePort。写请求本身也可以携带数据，所以“消息带有数据”同样不能决定端口类型。
+
+缓存访问下游时则换了角色：缓存的 mem_side 发起下游请求，使用 RequestPort；下游接收请求的一端使用 ResponsePort。也就是说，**同一个缓存对 CPU 是响应方，对下游是请求方**。
+
 ### 内存侧端口：为什么 RequestPort 要重写 recvTimingResp
 
 `MemSidePort` 继承 `RequestPort`，因为它主动向下游发出请求。请求发出后，它还要接收下游返回的响应，因此重写：

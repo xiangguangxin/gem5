@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="820" viewBox="0 0 1280 820" role="img" aria-labelledby="title desc">
+<title id="title">EventQueue：nextBin 与 nextInBin</title><desc id="desc">蓝色横向箭头连接不同 bin 的头事件，绿色纵向箭头连接同 bin 内的事件。bin 按触发时间和优先级分组。</desc>
+<defs>
+ <marker id="blue" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0 L10 5 L0 10Z" fill="#2563eb"/></marker>
+ <marker id="green" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0 L10 5 L0 10Z" fill="#059669"/></marker>
+</defs>
+<rect width="1280" height="820" rx="24" fill="#f8fafc"/>
+<style>text{font-family:"Noto Sans CJK SC","Microsoft YaHei",sans-serif;fill:#0f172a}.title{font-size:30px;font-weight:700}.sub{font-size:17px;fill:#64748b}.group{font-size:20px;font-weight:700}.name{font-size:23px;font-weight:700}.meta{font-size:16px;fill:#475569}.label{font-size:17px;font-weight:600}.note{font-size:17px}</style>
+<text x="48" y="57" class="title">事件队列的两层连接</text>
+<text x="48" y="89" class="sub">一个 bin = 相同触发时间 when + 相同优先级 priority；每个方框都是一个 Event</text>
+
+<rect x="124" y="125" width="304" height="490" rx="20" fill="#fff" stroke="#e2e8f0" stroke-width="2"/>
+<text x="140" y="159" class="group">BIN 0</text>
+<text x="140" y="188" class="meta">10 ns · priority 0</text>
+<rect x="524" y="125" width="304" height="490" rx="20" fill="#fff" stroke="#e2e8f0" stroke-width="2"/>
+<text x="540" y="159" class="group">BIN 1</text>
+<text x="540" y="188" class="meta">10 ns · priority 10</text>
+<rect x="924" y="125" width="304" height="490" rx="20" fill="#fff" stroke="#e2e8f0" stroke-width="2"/>
+<text x="940" y="159" class="group">BIN 2</text>
+<text x="940" y="188" class="meta">20 ns · priority 0</text>
+<rect x="140" y="220" width="272" height="82" rx="14" fill="#eff6ff" stroke="#93c5fd" stroke-width="2"/>
+<text x="158" y="252" class="name">A · 当前组头</text>
+<text x="158" y="279" class="meta">10 ns / priority 0</text>
+<rect x="140" y="370" width="272" height="82" rx="14" fill="#ecfdf5" stroke="#a7f3d0" stroke-width="2"/>
+<text x="158" y="402" class="name">B</text>
+<text x="158" y="429" class="meta">10 ns / priority 0</text>
+<rect x="540" y="220" width="272" height="82" rx="14" fill="#eff6ff" stroke="#93c5fd" stroke-width="2"/>
+<text x="558" y="252" class="name">C · 组头</text>
+<text x="558" y="279" class="meta">10 ns / priority 10</text>
+<rect x="540" y="370" width="272" height="82" rx="14" fill="#ecfdf5" stroke="#a7f3d0" stroke-width="2"/>
+<text x="558" y="402" class="name">D</text>
+<text x="558" y="429" class="meta">10 ns / priority 10</text>
+<rect x="940" y="220" width="272" height="82" rx="14" fill="#eff6ff" stroke="#93c5fd" stroke-width="2"/>
+<text x="958" y="252" class="name">E · 组头</text>
+<text x="958" y="279" class="meta">20 ns / priority 0</text>
+<text x="44" y="254" class="label" style="fill:#2563eb">head</text>
+<path d="M45 270 L126 270" fill="none" stroke="#2563eb" stroke-width="3" marker-end="url(#blue)"/>
+<path d="M412 255 L528 255" fill="none" stroke="#2563eb" stroke-width="3" marker-end="url(#blue)"/>
+<text x="432" y="240" class="label" style="fill:#2563eb">nextBin</text>
+<path d="M812 255 L928 255" fill="none" stroke="#2563eb" stroke-width="3" marker-end="url(#blue)"/>
+<text x="832" y="240" class="label" style="fill:#2563eb">nextBin</text>
+<path d="M276 303 L276 357" fill="none" stroke="#059669" stroke-width="3" marker-end="url(#green)"/>
+<text x="293" y="340" class="label" style="fill:#059669">nextInBin</text>
+<path d="M276 453 L276 515" fill="none" stroke="#059669" stroke-width="3" marker-end="url(#green)"/>
+<text x="244" y="544" class="meta">nullptr</text>
+<path d="M676 303 L676 357" fill="none" stroke="#059669" stroke-width="3" marker-end="url(#green)"/>
+<text x="693" y="340" class="label" style="fill:#059669">nextInBin</text>
+<path d="M676 453 L676 515" fill="none" stroke="#059669" stroke-width="3" marker-end="url(#green)"/>
+<text x="644" y="544" class="meta">nullptr</text>
+<path d="M1076 303 L1076 357" fill="none" stroke="#059669" stroke-width="3" marker-end="url(#green)"/>
+<text x="960" y="395" class="meta">nextInBin = nullptr</text>
+<text x="963" y="451" class="meta">nextBin = nullptr</text>
+<text x="158" y="586" class="meta">同组：时间和优先级都相同</text>
+<text x="558" y="586" class="meta">同为 10 ns，但属于另一个组</text>
+<text x="958" y="586" class="meta">下一触发时间的组</text>
+<rect x="48" y="642" width="1184" height="137" rx="18" fill="#0f172a"/>
+<text x="72" y="676" class="note" style="fill:#93c5fd">蓝色 nextBin：跨组，只保证当前组头上的连接有效。</text>
+<text x="72" y="710" class="note" style="fill:#6ee7b7">绿色 nextInBin：组内，按栈式 LIFO 连接；B 接任 A 前要继承 A.nextBin → C。</text>
+<text x="72" y="746" class="note" style="fill:#f8fafc">无新事件或退出干扰时，本图处理顺序：A → B → C → D → E。</text>
+</svg>
