@@ -89,3 +89,19 @@ Requirement
 | Skill 目录 | 作用 |
 |---|---|
 | grilling | 架构压力测试——对设计持续追问与推演 |
+
+
+## 技术文档绘图 Skill
+
+[technical-diagrams](skills/technical-diagrams/SKILL.md) 用于架构图、指针图、状态图和时序图：按用途选择 Mermaid、原生 SVG 或可选 D2，保留可维护源文件，检查后嵌入 Markdown。
+
+- [工具选择与本地命令](skills/technical-diagrams/references/tools.md)
+- [SVG 风格模板](skills/technical-diagrams/assets/diagram-template.svg)
+- [SVG 基础检查脚本](skills/technical-diagrams/scripts/check_svg.py)
+
+调用示例：`使用 .claude/skills/technical-diagrams/SKILL.md，为 nextBin/nextInBin 画 SVG 指针图并插入笔记。`
+
+默认本地执行，无需在线账号；没有安装 D2/Mermaid CLI 也可直接写 SVG。外部画布插件不是必选依赖。这里创建的是仓库级技能文件，不等于已安装软件或已在所有 Agent 客户端全局启用。
+
+
+此技能已在仓库根目录 CLAUDE.md 中设为技术文档的默认配图流程：适合用图说明时自动采用，不要求每篇都画图。现有文档修改保留所在路径；提交、推送和工具安装仍按用户授权执行。

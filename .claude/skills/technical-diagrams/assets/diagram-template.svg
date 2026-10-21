@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="360" viewBox="0 0 960 360" role="img" aria-labelledby="title desc">
+  <title id="title">请求与响应示例</title>
+  <desc id="desc">请求方经蓝色箭头发送请求，响应方经绿色箭头返回响应。</desc>
+  <defs>
+    <marker id="request-arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#2563eb"/></marker>
+    <marker id="response-arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#059669"/></marker>
+  </defs>
+  <rect width="960" height="360" rx="20" fill="#f8fafc"/>
+  <g font-family="Noto Sans CJK SC, Microsoft YaHei, sans-serif" fill="#0f172a">
+    <text x="40" y="52" font-size="28" font-weight="700">事务通信：请求与响应</text>
+    <rect x="64" y="105" width="240" height="150" rx="16" fill="#eff6ff" stroke="#93c5fd" stroke-width="2"/>
+    <rect x="656" y="105" width="240" height="150" rx="16" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="2"/>
+    <text x="184" y="176" text-anchor="middle" font-size="24" font-weight="700">请求方</text>
+    <text x="776" y="176" text-anchor="middle" font-size="24" font-weight="700">响应方</text>
+    <text x="184" y="209" text-anchor="middle" font-size="17">发请求 · 收响应</text>
+    <text x="776" y="209" text-anchor="middle" font-size="17">收请求 · 发响应</text>
+    <path d="M306 145H642" stroke="#2563eb" stroke-width="3" marker-end="url(#request-arrow)"/>
+    <text x="480" y="130" text-anchor="middle" font-size="18" fill="#1d4ed8">请求</text>
+    <path d="M654 225H318" stroke="#059669" stroke-width="3" marker-end="url(#response-arrow)"/>
+    <text x="480" y="211" text-anchor="middle" font-size="18" fill="#047857">响应</text>
+    <text x="64" y="311" font-size="17" fill="#475569">箭头表达逻辑方向，具体等待和完成条件由组件模型决定。</text>
+  </g>
+</svg>
