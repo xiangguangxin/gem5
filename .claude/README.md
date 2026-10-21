@@ -80,7 +80,7 @@ Requirement
 | 03 | executing-plans | 执行计划——小步执行、小步验证 |
 | 04 | subagent-driven-development | 子 Agent 驱动开发——拆分复杂任务 |
 | 05 | test-driven-development | 测试驱动开发——RED / GREEN / REFACTOR |
-| 06 | bug-fix | 系统化修复——复现 → 根因 → 影响 → 修复 → 回归 |
+| 06 | [bug-fix](skills/bug-fix/SKILL.md) | 系统化调试——需求、设计、实现、配置/环境四象限 → 日志/GDB 定位 → 假设实验 → 修复与回归 |
 | 07 | requesting-code-review | 代码审查——需求 / 架构 / 边界 / 测试 / 规范 |
 | 08 | verification-before-completion | 完成前验证——交付前提供证据 |
 | 09 | git-worktrees | 多工作区——多任务并行独立环境 |
