@@ -69,6 +69,119 @@ schedule(event, curTick() + latency);
 
 **event 决定做什么，schedule 决定何时做，事件调度器负责到时执行。**
 
+### EventFunctionWrapper：把函数包装成事件
+
+`EventFunctionWrapper` 继承 Event，保存一个回调，并在调度器调用 process 时执行它。它适合成员函数的延迟执行、周期任务和设备完成通知，HelloObject、SimpleCache 都使用了它。
+
+```cpp
+EventFunctionWrapper(const std::function<void(void)> &callback,
+                     const std::string &name,
+                     bool del = false,
+                     Priority p = Default_Pri)
+    : Event(p), callback(callback), _name(name)
+{
+    if (del)
+        setFlags(AutoDelete);
+}
+```
+
+| 参数 | 用途 |
+|---|---|
+| callback | 事件触发时执行的可调用对象 |
+| name | 用于命名和调试的基础名字 |
+| del | 默认 false；为 true 时启用 AutoDelete 生命周期管理 |
+| p | 事件优先级，默认 Default_Pri |
+
+HelloObject 的成员初始化：
+
+```cpp
+event([this]{ processEvent(); }, name() + ".event"),
+```
+
+是在构造 event 对象，不是在调用 processEvent。第一个参数是 lambda，捕获当前 HelloObject 的 this 指针；第二个参数例如为 hello.event。后两项使用默认值。末尾逗号表示初始化列表还有后续成员。包装器的 name() 还会追加 `.wrapped_function_event`，因此传入基础名字与最终报告的完整事件名需要区分。
+
+### std::function 和 lambda 怎样保存任务
+
+```cpp
+std::function<void(void)> callback;
+// 等价的常见写法：std::function<void()> callback;
+```
+
+这声明一个能保存“无参数、无返回值”可调用对象的变量，可保存普通函数、lambda 等。它本身不计时、不调度，也不会因声明就执行。
+
+```cpp
+std::function<void()> callback = [this] { processEvent(); };
+callback(); // 此时才调用当前对象的 processEvent()
+```
+
+上面是成员函数环境内的示意。带捕获的 lambda 还保存捕获状态，不能简单当成普通函数指针；std::function 提供统一的可调用接口。捕获 this 不会复制整个对象，也不自动延长其生命周期，调用时对象必须仍然有效。
+
+包装器中的执行入口只有：
+
+```cpp
+void process() { callback(); }
+```
+
+即使没有写 override，它仍然重写 Event 的同签名虚函数。C++ 中 override 是可选的检查说明符；写上能帮助编译器发现签名错误，省略不会取消虚函数分派。
+
+```text
+构造 EventFunctionWrapper，保存 lambda
+ → schedule 安排事件
+ → 到指定仿真 tick，调用 event->process()
+ → callback()
+ → lambda 中的 HelloObject::processEvent()
+```
+
+EventFunctionWrapper 决定“做什么”，schedule 决定“何时做”。schedule 也接受其他 Event 子类，例如 MemberEventWrapper、LocalSimLoopExitEvent、CPUProgressEvent，或自己实现 process 的专用事件，并不只支持函数包装器。
+
+### schedule 是 gem5 提供的什么接口
+
+`schedule()` 是 gem5 内部的事件调度接口，不是 HelloObject 自己实现的函数，也不是 C++ 标准库函数。
+
+```cpp
+schedule(event, when);
+```
+
+第一个参数是要安排的事件，第二个参数是触发的绝对 tick。HelloObject 继承 SimObject，SimObject 又继承 EventManager，因此可以直接调用这个接口：
+
+```text
+HelloObject → SimObject → EventManager::schedule()
+    → 关联的 EventQueue::schedule()
+    → 事件入队，等待调度器执行
+```
+
+继承声明见 [sim_object.hh](../../../src/sim/sim_object.hh)，EventManager 的接口见 [eventq.hh](../../../src/sim/eventq.hh)。调用 schedule 不会当场调用 processEvent，也不会让宿主机线程 sleep；当前函数继续执行，未来由事件队列触发回调。
+
+### curTick 与 startup：当前时间和首次安排
+
+`curTick()` 返回当前事件队列对应的仿真时间，单位为 tick，不是宿主机实际经过的时间。tick 对应多少秒由仿真的全局频率决定，不能将一个 tick 固定理解为一个 CPU 周期。
+
+```cpp
+void HelloObject::startup()
+{
+    schedule(event, latency);
+}
+```
+
+startup 是对象生命周期中的启动钩子，在正常仿真事件循环开始处理事件前调用。本例借此安排第一次触发；单纯构造 EventFunctionWrapper 只绑定回调，不会自动把事件入队。
+
+```text
+startup：将 event 安排到绝对时间 2us
+    → 进入仿真事件循环
+    → 调度器在相应时间取出 event
+    → 调用 processEvent()
+```
+
+这里直接使用 latency，是基于示例从 tick 0 开始。若要表达“从当前时刻再等待一段时间”，应写：
+
+```cpp
+schedule(event, curTick() + latency);
+```
+
+例如当前时间为 2us、latency 对应 2us，目标时间就是 4us。不要把 `schedule(event, latency)` 当成任何时刻都表示“再等 latency”；若 latency 小于当前 tick，反而是在安排过去的事件，会违反调度约束。
+
+英文 schedule 作动词意为“安排、调度”，常见美式发音 /ˈskedʒuːl/，英式发音 /ˈʃedjuːl/。
+
 ## 4. HelloObject 的完整事件链
 
 源码入口：[HelloObject.py](../../../src/learning_gem5/part2/HelloObject.py)、[hello_object.hh](../../../src/learning_gem5/part2/hello_object.hh)、[hello_object.cc](../../../src/learning_gem5/part2/hello_object.cc)。
@@ -182,6 +295,168 @@ head
 
 另外有一个 `std::list<Event*> async_queue`，用于接收其他线程提交的事件，随后合并进主队列。不要将这个辅助队列与主事件队列混淆。
 
+### bin、nextBin 与 nextInBin 的区别
+
+**一个 bin 对应相同触发时间 when、相同优先级 priority 的一组事件。** 只有时间相同还不够，优先级不同也属于不同 bin。这里的 bin 是逻辑分组，主队列中没有必须单独创建的 Bin 容器对象，而是由 Event 自身的指针组织。
+
+| 指针 | 连接范围 | 指向什么 | 用途 |
+|---|---|---|---|
+| nextBin | 跨 bin | 排序中的下一个 bin 的头事件 | 寻找不同时间或优先级的组 |
+| nextInBin | 同一个 bin 内 | 同时间、同优先级的下一个事件 | 依次处理组内事件，采用栈式 LIFO |
+
+```text
+head
+ ↓
+A：10ns，priority 0 ──nextBin──→ C：10ns，priority 10 ──nextBin──→ D：20ns，priority 0
+ │ nextInBin
+ ↓
+B：10ns，priority 0
+ │ nextInBin
+ ↓
+空
+```
+
+图中 A、B 属于同一个 bin；C 虽然也是 10ns，但优先级不同，属于下一个 bin；D 时间更晚，又属于另一个 bin。
+
+- `head->nextInBin` 在这里指向 B，表示当前组还有事件。
+- `head->nextBin` 指向 C，表示当前组之后的下一组。
+- `nextInBin == nullptr` 表示这个事件没有组内后继，不表示整个队列结束。
+- 从有效组头出发，`nextBin == nullptr` 表示它是最后一个 bin；该 bin 内仍可能有多个事件。
+
+**跨 bin 连接只保证当前 bin 头上的 nextBin 有效。** 内部节点如 B 的 nextBin 可能是旧值，不能依赖它遍历整个主队列。B 接任组头前，要继承 A 当前的 nextBin。
+
+服务顺序是先处理头 bin 的组内栈，再转到下一个 bin：本图若无新事件或退出干扰，就依次处理 A、B、C、D。同 bin 后插入的事件成为组头，所以组内为 LIFO。
+
+### insert 的完整逻辑：先找 bin，再维护指针
+
+源码位于 [eventq.cc](../../../src/sim/eventq.cc) 的 `EventQueue::insert()`。它接收一个已经设置触发时间的事件，将它放入按“时间、优先级”排序的两层链表。Scheduled 标记等管理由外层 schedule 完成，不是 insert 的职责。
+
+```cpp
+void EventQueue::insert(Event *event)
+{
+    if (!head || *event <= *head) {
+        head = Event::insertBefore(event, head);
+        return;
+    }
+
+    Event *prev = head;
+    Event *curr = head->nextBin;
+    while (curr && *curr < *event) {
+        prev = curr;
+        curr = curr->nextBin;
+    }
+
+    prev->nextBin = Event::insertBefore(event, curr);
+}
+```
+
+#### 第一步：处理空队列和队头插入
+
+`!head` 表示空队列；`*event <= *head` 表示新事件的排序键早于或等于队头。Event 重载了比较运算符，先比较 when，同时间再比较 priority，数值较小者先执行。这里比较事件对象，不是指针地址。
+
+满足条件就调用 insertBefore，令返回的新 bin 头成为 head，随后直接 return。相等也放在前面，是同 bin 采用 LIFO 的关键。
+
+#### 第二步：沿 nextBin 查找，不遍历组内成员
+
+```cpp
+Event *prev = head;
+Event *curr = head->nextBin;
+```
+
+prev 保存前一个 bin 的头，curr 保存当前检查的 bin 头。队头情况已处理，所以从第二个 bin 开始查找：
+
+```cpp
+while (curr && *curr < *event) {
+    prev = curr;
+    curr = curr->nextBin;
+}
+```
+
+只要 curr 非空，且当前 bin 排在新事件之前，就继续前进。停止时 prev 在插入位置之前，curr 是第一个排序不早于新事件的 bin，或已到链尾。
+
+以相同优先级、插入 15ns 为例：
+
+```text
+初始：[5ns] → [10ns] → [20ns]
+        prev     curr
+
+10ns < 15ns，前进一步：
+      [5ns] → [10ns] → [20ns]
+                 prev     curr
+
+20ns < 15ns 不成立，停止：新 bin 应插在 10ns 和 20ns 之间。
+```
+
+| 停止情况 | 后续操作 |
+|---|---|
+| curr 与 event 的时间、优先级相同 | 新事件成为已有 bin 的头 |
+| event 排在 curr 前 | 在 prev 与 curr 之间加入新 bin |
+| curr 为空 | 在链尾加入新 bin |
+
+#### 第三步：insertBefore 决定加入旧 bin，还是新建 bin
+
+这是 Event 的静态辅助函数，返回插入后的 bin 头：
+
+```text
+insertBefore(event, curr)：
+    若 curr 为空，或 event 排在 curr 之前：
+        event.nextBin = curr
+        event.nextInBin = 空
+        返回 event                  // 新建 bin
+    否则：                         // 调用者保证此时排序键相同
+        event.nextBin = curr.nextBin
+        event.nextInBin = curr
+        返回 event                  // 加到已有 bin 顶部
+```
+
+注意辅助函数自己没有再次显式判断相等；相等来自 insert 的查找条件保证，不能将它当成对任意位置都能正确插入的通用函数。
+
+最后：
+
+```cpp
+prev->nextBin = Event::insertBefore(event, curr);
+```
+
+把前一个 bin 接到返回的新头。插入不同时间的 bin 时：
+
+```text
+[10ns] → [15ns 新头] → [20ns]
+```
+
+若新事件 E 与 curr=C 同时间、同优先级，则：
+
+```text
+prev ──nextBin──→ E ──nextBin──→ 下一组
+                 │ nextInBin
+                 ↓
+                 C → 原组内其他事件
+```
+
+prev 组内部旧成员的 nextBin 可能因此过时；只保证当前组头的跨 bin 指针有效。这也解释了 serviceOne 换组头前为何要执行 `next->nextBin = head->nextBin`。
+
+#### 整体伪代码
+
+```text
+插入新事件 E：
+    如果队列为空，或 E 的排序键 <= 队头排序键：
+        在队头之前插入，或压到队头 bin 顶部
+        更新 head，结束
+
+    prev = 第一个 bin
+    curr = 第二个 bin
+    当 curr 存在且 curr 的排序键 < E 的排序键：
+        prev = curr
+        curr = curr 的下一个 bin
+
+    如果 curr 的排序键等于 E：
+        E 压到 curr 所在 bin 顶部
+    否则：
+        E 成为一个新 bin，跨组后继为 curr
+    prev 的跨组后继 = E
+```
+
+插入的查找成本与经过的 bin 数相关，最坏需遍历所有 bin；找到后头插及连接是常数次指针操作。同 bin 的组内头插高效，不表示所有 insert 都是 O(1)。
+
 ## 7. 同时间、同优先级：为什么是 LIFO
 
 当前源码明确将同 bin 的事件组织为栈。`Event::insertBefore()` 在同组情况下执行：
@@ -225,6 +500,80 @@ assert(event->initialized());
 - 已在队列里的同一个事件不能直接再次 schedule；根据需要使用 `scheduled()`、`deschedule()` 或 `reschedule()`，并核对相关 API 语义。
 - `[this]` 捕获的是指针，不会自动延长对象寿命；回调执行前对象必须仍然有效。
 - 本文的链表/LIFO解释针对单个队列；多队列并行不是简单把它推广成全局顺序。
+
+### EventQueue::schedule 的源码执行步骤
+
+前面模型调用的是 EventManager 接口，最终转到队列的实现：
+
+```cpp
+void schedule(Event *event, Tick when, bool global=false)
+{
+    assert(when >= getCurTick());
+    assert(!event->scheduled());
+    assert(event->initialized());
+
+    event->setWhen(when, this);
+
+    if (inParallelMode && (this != curEventQueue() || global)) {
+        asyncInsert(event);
+    } else {
+        insert(event);
+    }
+    event->flags.set(Event::Scheduled);
+    event->acquire();
+
+    if (debug::Event)
+        event->trace("scheduled");
+}
+```
+
+| 步骤 | 作用 |
+|---|---|
+| 三个 assert | 检查不调度到过去、事件未重复调度、事件已经初始化 |
+| setWhen(when, this) | 设置触发时间，并关联当前目标队列；此处 this 是 EventQueue |
+| insert / asyncInsert | 直接插入主队列，或通过辅助队列提交 |
+| 设置 Scheduled | 标记事件已安排，不能再直接重复 schedule |
+| acquire | 调用生命周期管理入口；普通非 Managed 成员事件不走 Managed 钩子 |
+| trace | 开启 Event 调试标志时记录日志，不决定是否执行事件 |
+
+这里不会执行回调，也不会直接推进仿真时间；真正执行在后续 serviceOne 中完成。
+
+### 并行入队判断：什么时候走 asyncInsert
+
+把条件翻译成中文：
+
+```text
+正在并行仿真，并且（目标队列不是当前线程的队列，或者按全局事件调度）
+    → asyncInsert
+否则
+    → insert
+```
+
+| 表达式 | 含义 |
+|---|---|
+| inParallelMode | 当前是否处于多队列并行仿真模式 |
+| this | 本次 schedule 的目标 EventQueue |
+| curEventQueue() | 当前线程对应的事件队列 |
+| global | 是否按全局事件方式提交，不是说普通事件永远属于某个“全局队列” |
+
+四种情况：
+
+| 场景 | 结果 | 原因 |
+|---|---|---|
+| 非并行模式 | insert | 不需要走这条并行提交路径 |
+| 并行，目标是自己的队列，global=false | insert | 本线程向自己的队列安排普通事件 |
+| 并行，处理队列 A，却向队列 B 提交 | asyncInsert | 避免直接修改另一线程正在使用的主队列 |
+| 并行，global=true，即使目标是自己 | asyncInsert | 配合全局事件机制维护事件间的总顺序 |
+
+```text
+直接路径：schedule → insert → 主事件队列
+辅助路径：schedule → asyncInsert → 目标队列的 async_queue
+                              → 在规定的同步处理中合并到主队列
+```
+
+asyncInsert 不是立刻执行事件，也不表示新建宿主机线程。跨队列提交还要遵守并行仿真的时间与同步约束，不能仅凭可以调用接口就任意安排时间。全局事件的完整规则见 [global_event.hh](../../../src/sim/global_event.hh) 及对应实现。
+
+这里的 async_queue 与第 11 节的 async_event 布尔标志不同：前者保存提交的事件，后者提醒主循环处理外部控制请求。对 HelloObject 的常规单队列运行，先掌握 insert 直接入队路径即可。
 
 ## 9. 通过日志观察事件驱动
 
