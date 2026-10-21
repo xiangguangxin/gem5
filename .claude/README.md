@@ -105,3 +105,13 @@ Requirement
 
 
 此技能已在仓库根目录 CLAUDE.md 中设为技术文档的默认配图流程：适合用图说明时自动采用，不要求每篇都画图。现有文档修改保留所在路径；提交、推送和工具安装仍按用户授权执行。
+
+
+## REA：按需二进制与应用分析
+
+已整合 [reverse-engineer-anything 官方 Skill](skills/reverse-engineer-anything/SKILL.md) 及配套参考，来源、固定提交、MIT 许可和环境状态见 [REA 项目集成说明](integrations/rea/README.md)。
+
+- 用途：无源码二进制、交付包、请求范围内的运行时行为分析。
+- 普通 gem5 C++/SLICC 源码解释仍使用仓库阅读流程，图形输出交给 technical-diagrams。
+- 本地环境检查：`python3 .claude/integrations/rea/check_environment.py`。
+- Skill 文件已纳入仓库，不代表 Node、分析引擎或 MCP 已安装连接。项目 local-scope 接入方式见集成说明，不自动改全局客户端设置。
