@@ -11,14 +11,18 @@ MSI-cache.sm 定义的是 **L1 缓存控制器的状态机**，不是整个 Ruby
 flowchart TB
     cpu["仿真 CPU"] <--> seq["RubySequencer<br/>CPU 接入、事务跟踪、返回响应"]
     subgraph local["一个 L1 缓存控制器实例及其关联资源"]
-        mq["mandatoryQueue<br/>本地 CPU 请求输入队列"] --> decode["输入处理 in_port<br/>消息 / 请求 → 状态机事件"]
-        fwd["forwardFromDir<br/>目录转发与控制消息"] --> decode
-        resp["responseFromDirOrSibling<br/>Data / InvAck"] --> decode
-        decode --> sm["transition + action<br/>状态与事件决定动作"]
+        mq["mandatoryQueue<br/>MessageBuffer：本地 CPU 请求"] --> min["in_port：mandatory_in<br/>RubyRequest → Load / Store 等事件"]
+        fwd["forwardFromDir<br/>MessageBuffer：目录转发与控制消息"] --> fin["in_port：forward_in<br/>RequestMsg → 转发 / 失效等事件"]
+        resp["responseFromDirOrSibling<br/>MessageBuffer：Data / InvAck"] --> rin["in_port：response_in<br/>ResponseMsg → 数据 / 确认事件"]
+        min -->|"trigger"| sm["transition + action<br/>当前块状态 + 事件 → 动作与下一状态"]
+        fin -->|"trigger"| sm
+        rin -->|"trigger"| sm
         sm <--> cache["cacheMemory / Entry<br/>缓存块数据与本地状态"]
         sm <--> tbe["TBEs<br/>未完成事务的临时状态、数据、确认计数"]
-        sm --> reqout["requestToDir<br/>GetS / GetM / PutS / PutM"]
-        sm --> respout["responseToDirOrSibling<br/>Data / InvAck"]
+        sm -->|"enqueue"| reqport["out_port：request_out<br/>RequestMsg 输出入口"]
+        sm -->|"enqueue"| respport["out_port：response_out<br/>ResponseMsg 输出入口"]
+        reqport -->|"写入关联队列"| reqout["requestToDir<br/>MessageBuffer：GetS / GetM / PutS / PutM"]
+        respport -->|"写入关联队列"| respout["responseToDirOrSibling<br/>MessageBuffer：Data / InvAck"]
     end
     seq -->|"提交 RubyRequest"| mq
     sm -->|"读写完成回调"| seq
@@ -31,7 +35,53 @@ flowchart TB
     dir <--> mem["内存系统"]
 ```
 
+### 图中各个组成部分是什么
+
+先把图中的对象理解为“谁提出请求、哪里暂存消息、谁决定动作、数据存在哪里”：
+
+| 图中组成部分 | 作用与理解方式 |
+|---|---|
+| 仿真 CPU | 执行程序，产生取指、读数据、写数据等访存请求，并接收完成响应。 |
+| RubySequencer | CPU 与 Ruby 缓存系统之间的接入组件：将请求转换为 RubyRequest、跟踪未完成访问，并在控制器通知完成后回应 CPU。 |
+| mandatoryQueue | 保存 Sequencer 提交的本地 CPU 请求，是一个 MessageBuffer；名称中的 mandatory 不表示最高优先级。 |
+| forwardFromDir | 保存目录发来的转发或控制消息，例如转发 GetS/GetM、失效通知 Inv、逐出确认 PutAck。 |
+| responseFromDirOrSibling | 保存目录或其他同级缓存发来的响应，例如 Data、InvAck；Sibling 就是其他同级 L1。 |
+| in_port：mandatory_in / forward_in / response_in | 分别检查上述三个输入队列，读取就绪请求或消息，解析为事件后调用 trigger。它们是输入处理入口，不是另外三个队列。 |
+| transition + action | 控制器的处理核心：transition 规定某个缓存块在“当前状态 + 事件”下执行哪些动作、进入什么状态；action 实现读写数据、发消息、通知完成等操作。 |
+| cacheMemory / Entry | cacheMemory 管理缓存存储及条目；Entry 表示一个缓存条目，保存该块的数据和本地一致性状态等信息。 |
+| TBEs | 管理未完成事务的临时记录，每个 TBE 可保存瞬态、临时数据和待收确认数量等；不是存放所有缓存块的主存储。 |
+| out_port：request_out / response_out | 动作中 enqueue 使用的输出入口，分别关联下面两个输出队列；入口本身不存消息。 |
+| requestToDir | 暂存准备发往目录的 GetS/GetM/PutS/PutM 请求，再交给 Ruby 网络传输。 |
+| responseToDirOrSibling | 暂存准备发往目录或其他同级缓存的 Data/InvAck 响应，再交给 Ruby 网络传输。 |
+| Ruby 网络 | 在控制器之间传递一致性消息。当前教学配置使用 SimpleNetwork；Ruby 也可以选用更详细的 Garnet 网络模型。 |
+| Directory Controller | 目录控制器，记录每个块有哪些共享者、谁是 Owner，协调权限申请、转发、失效及与内存的交互。 |
+| 其他 L1 控制器 | 其他 CPU 对应的缓存控制器；可能持有同一块的副本，需要响应失效或向请求方提供数据。 |
+| 内存系统 | 为目录协调的内存读写提供服务。某块最新数据也可能在持有 M 状态的缓存中，因此不是每次都由内存提供最新数据。 |
+
+图中外框表示**一个 L1 控制器实例及它使用的资源**；框外的 Sequencer、网络、目录和其他缓存与它协作。各类 MessageBuffer 的共同作用是暂存消息，处理消息的规则由控制器状态机决定。
+
+### 这张图怎样运转
+
+可以沿着一次 CPU 读请求来看：
+
+1. **请求进入控制器。** CPU 把访存请求交给 RubySequencer，Sequencer 将其转换成 RubyRequest，放入 `mandatoryQueue`。队列先保存请求，`mandatory_in` 这个 `in_port` 在请求就绪后读取它，将读操作识别为 `Load` 事件。
+2. **根据当前块的状态决定动作。** `trigger` 带着事件、块地址以及对应的 Entry/TBE 进入状态机，匹配“当前状态 + 事件”的 `transition`。例如，块处于 S/M 时可在本地完成读；处于 I 时，需要申请数据和共享读权限。`cacheMemory / Entry` 保存缓存块数据与本地状态，TBE 跟踪尚未完成的事务。
+3. **需要外部协作时发送消息。** 以冷读为例，动作通过 `enqueue(request_out, ...)` 将 GetS 放入 `requestToDir`，再由 Ruby 网络送往目录控制器。`request_out` 是输出入口，`requestToDir` 才是存放待发消息的队列。
+4. **消息回来后继续推进状态机。** 目录或其他缓存返回的 Data 进入 `responseFromDirOrSibling`，由 `response_in` 解码成事件，再次触发状态转移。目录转发和失效等控制消息则经 `forwardFromDir → forward_in` 处理；需要回送 Data/InvAck 时，使用 `response_out → responseToDirOrSibling → Ruby 网络`。
+5. **满足完成条件后通知 CPU。** 控制器按协议更新缓存数据和状态、释放相应临时资源，通过完成回调通知 Sequencer，再由 Sequencer 向 CPU 返回响应。这个回调不绕行 Ruby 网络，也不重新放入 `mandatoryQueue`。
+
+因此，图中的核心循环是：**请求或消息入队 → in_port 识别事件 → 状态机执行动作 → 本地完成，或发消息并等待后续事件**。一次访存可能经历多次事件和状态转换，并不是进入一次 `in_port` 就一定能立即返回。
+
 图中的 Entry、TBE 和队列是关联资源，不代表都物理嵌在同一块硬件存储中。CPU 正常访存经 Sequencer；程序加载等 functional 访问还有系统代理入口，详见 [配置与运行](config_and_run.md)。
+
+图中将 **SLICC 的逻辑处理入口**与 **MessageBuffer 队列**分开画，便于对应源码；不表示 `in_port` / `out_port` 是额外的队列或独立硬件模块：
+
+```text
+接收：输入 MessageBuffer → in_port 检查就绪、解析消息 → trigger → transition / action
+发送：action 中 enqueue(out_port, ...) → 关联的输出 MessageBuffer → Ruby 网络
+```
+
+例如，`sendGetS` 动作通过 `request_out` 写入 `requestToDir`，随后由网络传输 GetS；控制器并不是通过 `in_port` 发消息。向 Sequencer 发出的读写完成回调则走图中的直接回调路径，不经过这些网络输出队列。
 
 ### 三个容易混淆的对象
 
@@ -117,6 +167,37 @@ machine(MachineType:L1Cache, "MSI cache")
 MessageBuffer 是队列组件，mandatoryQueue 是其中一个实例。mandatory 中文是“必须的”，不表示最高优先级。Sibling 指其他同级 L1。
 
 SLICC 中 network="To"/"From" 相对于本控制器。in_port/out_port 将队列接入状态机，不等同于普通 C++ RequestPort/ResponsePort。
+
+### out_port 在哪里，与输出队列是什么关系
+
+源码的 `Input/output network definitions` 部分明确声明了两个输出入口：
+
+```slicc
+out_port(request_out, RequestMsg, requestToDir);
+out_port(response_out, ResponseMsg, responseToDirOrSibling);
+```
+
+三个参数依次是 **输出入口名称、消息类型、关联的 MessageBuffer**。后续动作使用入口名称发送消息，例如：
+
+```slicc
+enqueue(request_out, RequestMsg, 1) {
+    out_msg.addr := address;
+    out_msg.Type := CoherenceRequestType:GetS;
+    // 其余字段按 sendGetS 的实现填写：目的目录、消息大小、Requestor 等
+}
+```
+
+上面是省略部分字段的结构示例，不是完整可替换的动作。`request_out` 使动作能够向 `requestToDir` 入队；它不负责替代 Ruby 网络完成路由。参数 `1` 是这里的入队延迟，以控制器周期计，不是完整网络传输时间。
+
+| 类型 | SLICC 入口名 | 关联队列 | 用途 |
+|---|---|---|---|
+| in_port | mandatory_in | mandatoryQueue | 读取本地 CPU 请求并触发事件 |
+| in_port | forward_in | forwardFromDir | 读取目录转发和控制消息并触发事件 |
+| in_port | response_in | responseFromDirOrSibling | 读取 Data / InvAck 并触发事件 |
+| out_port | request_out | requestToDir | 写入发往目录的 RequestMsg |
+| out_port | response_out | responseToDirOrSibling | 写入发往目录或其他缓存的 ResponseMsg |
+
+因此，**队列存消息，in_port 定义输入处理逻辑，out_port 为动作提供指定类型消息的输出入口**。本例有三个输入入口、两个输出入口；它们与三个虚拟网络的数量没有一一对应关系。
 
 ## 6. 状态：不仅要记录 I/S/M，还要记录等待
 
