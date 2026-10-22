@@ -60,6 +60,18 @@ flowchart TB
 
 图中外框表示**一个 L1 控制器实例及它使用的资源**；框外的 Sequencer、网络、目录和其他缓存与它协作。各类 MessageBuffer 的共同作用是暂存消息，处理消息的规则由控制器状态机决定。
 
+### RubySequencer 属于哪里：独立于控制器，但属于 Ruby 系统
+
+**RubySequencer 是 Ruby 系统面向 CPU 的接入组件。** “独立”说的是它与 L1 缓存控制器分别创建、相互关联，并不是说它在 Ruby 系统之外。
+
+在 [msi_caches.py](../../../configs/learning_gem5/part3/msi_caches.py) 中，`L1Cache(...)` 和 `RubySequencer(...)` 分别创建，Sequencer 的 `ruby_system=self` 指向当前 Ruby 系统，再通过下面的赋值关联到缓存控制器：
+
+```python
+c.sequencer = self.sequencers[i]
+```
+
+架构图的外框只圈出“一个 L1 控制器实例及其关联资源”，并不是整个 Ruby 系统的边界。框外的 Sequencer、Ruby 网络、目录控制器和其他 L1 也都是 Ruby 系统的组成部分。
+
 ### 这张图怎样运转
 
 可以沿着一次 CPU 读请求来看：
@@ -199,6 +211,41 @@ enqueue(request_out, RequestMsg, 1) {
 
 因此，**队列存消息，in_port 定义输入处理逻辑，out_port 为动作提供指定类型消息的输出入口**。本例有三个输入入口、两个输出入口；它们与三个虚拟网络的数量没有一一对应关系。
 
+### 为什么有两个输出队列
+
+这里是**两个 out_port 分别关联一个队列**，不是 `response_out` 同时关联两个队列：
+
+```text
+request_out  → requestToDir            → Ruby 网络的 vnet 0
+response_out → responseToDirOrSibling  → Ruby 网络的 vnet 2
+```
+
+| 发送场景 | 消息 | 选择的入口和队列 |
+|---|---|---|
+| 自己需要读权限或写权限，请目录协调 | GetS / GetM | request_out → requestToDir |
+| 自己逐出共享块或修改块，通知目录 | PutS / PutM | request_out → requestToDir |
+| 其他缓存需要自己持有的数据 | Data | response_out → responseToDirOrSibling |
+| 按目录要求失效本地副本，向请求方确认 | InvAck | response_out → responseToDirOrSibling |
+
+队列分别承载本协议定义的请求与响应，两者最终仍接入同一个 Ruby 网络。在这个教学 MSI 协议中，它们使用不同虚拟网络，有助于避免响应被阻塞的请求挡住；防止死锁还需要协议及网络资源依赖设计共同保证，不是只创建两个队列就自动解决。
+
+**`response_out` 发送的是缓存一致性响应，不是直接向 CPU 返回访存结果。** 它通过 `responseToDirOrSibling` 向目录或同级缓存发送 Data/InvAck。CPU 访问完成则走“控制器完成回调 → RubySequencer → CPU”这条本地路径。
+
+### Sibling 的中文含义
+
+Sibling 原意是“兄弟姐妹”，在这里表示**同级节点**，具体指其他同级的 L1 缓存控制器，不是另一个 CPU 接口，也不是本地缓存中的另一个缓存块。
+
+因此，`responseToDirOrSibling` 可拆为：
+
+```text
+response       响应
+To             发往
+Dir            目录控制器（Directory）
+OrSibling      或其他同级 L1 缓存控制器
+```
+
+整个名称就是“发往目录或其他同级缓存的响应队列”。`responseFromDirOrSibling` 则相反，表示“来自目录或其他同级缓存的响应队列”；To/From 都以当前控制器为参照。
+
 ## 6. 状态：不仅要记录 I/S/M，还要记录等待
 
 | 状态 | 权限标记 | 主要含义 |
@@ -221,6 +268,10 @@ AccessPermission 用于框架确定数据访问许可，尤其是 functional 访
 
 ## 7. Entry 与 TBE：存储数据和跟踪事务
 
+**TBE 是 Transaction Buffer Entry，中文可以理解为“事务缓冲条目”。** 这里的事务指一次需要持续跟踪、尚未完成的协议处理过程，例如缓存缺失后等待数据、申请写权限时等待失效确认。
+
+可以把 **Entry 理解为“缓存块的存放位置和状态记录”，TBE 理解为“这个块正在办理的事情的临时记录”**。发出请求后，控制器还要知道这个块在等什么、收到消息后怎样继续，不能发完请求就忘记了。
+
 以下摘录保留实际字段，省略 desc：
 
 ```slicc
@@ -237,6 +288,32 @@ structure(TBE) {
 ```
 
 Entry 关联缓存槽位，保存块数据与本地状态。TBE 是 Transaction Buffer Entry，记录未完成事务；DataBlk 在需要暂存数据的路径中使用，不是每次接收 Data 都先放入 TBE。
+
+| TBE 字段 | 记录什么 |
+|---|---|
+| TBEState | 当前事务的临时状态，例如 IS_D 表示从 I 向 S 过渡、等待数据 |
+| DataBlk | 必要时暂存一个缓存块的数据；具体是否使用由协议动作决定 |
+| AcksOutstanding | 跟踪待协调的失效确认数量；本实现中确认早于目录 Data 到达时可暂时为负数，之后结合 Data 中的 Acks 补齐计数 |
+
+### 例子：CPU 冷读一个缓存中没有的块 X
+
+```text
+X 当前为 I，CPU 发起读请求
+    ↓
+匹配 transition(I, Load, IS_D)
+    ↓
+分配缓存条目和 X 的 TBE，发送 GetS，进入 IS_D
+    ↓
+等待期间，通过 X 的块地址找到 TBE，知道这笔事务还在等数据
+    ↓
+收到 Data，识别为 DataDirNoAcks 或 DataOwner 事件
+    ↓
+匹配 IS_D → S：将数据写入缓存、释放 TBE、通知 Sequencer 读完成
+```
+
+**释放 TBE 是结束这笔事务的临时跟踪，不是删除已经填入缓存的 X。** 此时 X 的数据和 S 状态仍由缓存 Entry 保存，后续读取可以直接命中。若暂时没有可分配的 TBE，依赖该资源的新事务就不能立即启动，需要等待资源释放。
+
+### TBE 与 TBEs 的区别
 
 ```slicc
 TBETable TBEs, template="<L1Cache_TBE>", constructor="m_number_of_TBEs";
