@@ -176,6 +176,26 @@ Python 示例创建统一指令/数据 L1，容量 16KiB、8 路；这些是配�
 
 建议从文件末尾的冷读 transition 入手，再反查同名 action；不用先逐行读完所有辅助函数。
 
+### 图中组件的源码位置速查
+
+同一个对象通常需要沿三层看：**`.sm` 声明协议中的用途 → Python 创建和关联实例 → C++ 提供通用存储或队列实现**。下表链接可直接打开源码，行号对应本次核对的仓库版本；后续源码变化时可按所列名称搜索。
+
+| 组件 | 教学协议中的声明或使用位置 | 创建位置 / 底层实现 |
+|---|---|---|
+| mandatoryQueue | [MSI-cache.sm:72](../../../src/learning_gem5/part3/MSI-cache.sm#L72) 声明 `MessageBuffer *mandatoryQueue`；[第 409 行](../../../src/learning_gem5/part3/MSI-cache.sm#L409) 的 `mandatory_in` 读取它 | [msi_caches.py:163](../../../configs/learning_gem5/part3/msi_caches.py#L163) 创建 `self.mandatoryQueue = MessageBuffer()`；队列类型见 [MessageBuffer.py:52](../../../src/mem/ruby/network/MessageBuffer.py#L52)、[MessageBuffer.hh:74](../../../src/mem/ruby/network/MessageBuffer.hh#L74)，队列操作实现在 [MessageBuffer.cc](../../../src/mem/ruby/network/MessageBuffer.cc) |
+| cacheMemory | [MSI-cache.sm:46](../../../src/learning_gem5/part3/MSI-cache.sm#L46) 声明 `CacheMemory *cacheMemory` | [msi_caches.py:131](../../../configs/learning_gem5/part3/msi_caches.py#L131) 创建 `RubyCache`；[RubyCache.py:35](../../../src/mem/ruby/structures/RubyCache.py#L35) 映射到 C++ `gem5::ruby::CacheMemory`；类定义见 [CacheMemory.hh:67](../../../src/mem/ruby/structures/CacheMemory.hh#L67) |
+| 缓存 Entry | [MSI-cache.sm:155](../../../src/learning_gem5/part3/MSI-cache.sm#L155) 定义 `CacheState`、`DataBlk`；[第 631 行](../../../src/learning_gem5/part3/MSI-cache.sm#L631) 的 `allocateCacheBlock` 用 `new Entry` 分配条目 | 通用基类见 [AbstractCacheEntry.hh:64](../../../src/mem/ruby/slicc_interface/AbstractCacheEntry.hh#L64)；放入缓存的分配操作见 [CacheMemory.cc:291](../../../src/mem/ruby/structures/CacheMemory.cc#L291)，查找见 [第 367 行](../../../src/mem/ruby/structures/CacheMemory.cc#L367) |
+| L1 缓存控制器 | [MSI-cache.sm](../../../src/learning_gem5/part3/MSI-cache.sm) 的 `machine(MachineType:L1Cache, ...)`、输入处理、action 和 transition 定义协议行为 | [msi_caches.py:114](../../../configs/learning_gem5/part3/msi_caches.py#L114) 的 `L1Cache(MSI_L1Cache_Controller)` 配置控制器及其资源 |
+| 目录控制器 | [MSI-dir.sm:47](../../../src/learning_gem5/part3/MSI-dir.sm#L47) 定义 `machine(MachineType:Directory, ...)`，具体协议行为在该文件的输入处理、action 和 transition 中 | [msi_caches.py:180](../../../configs/learning_gem5/part3/msi_caches.py#L180) 的 `DirController(MSI_Directory_Controller)` 配置控制器；[第 75 行](../../../configs/learning_gem5/part3/msi_caches.py#L75) 创建本例的目录控制器实例 |
+| 目录存储与目录 Entry | [MSI-dir.sm:53](../../../src/learning_gem5/part3/MSI-dir.sm#L53) 声明 `DirectoryMemory *directory`；[第 129 行](../../../src/learning_gem5/part3/MSI-dir.sm#L129) 定义目录 Entry 的 `DirState`、`Sharers`、`Owner` | [msi_caches.py:197](../../../configs/learning_gem5/part3/msi_caches.py#L197) 创建 `RubyDirectoryMemory`；映射见 [DirectoryMemory.py:47](../../../src/mem/ruby/structures/DirectoryMemory.py#L47)，底层见 [DirectoryMemory.hh:60](../../../src/mem/ruby/structures/DirectoryMemory.hh#L60)、[DirectoryMemory.cc](../../../src/mem/ruby/structures/DirectoryMemory.cc) |
+| TBE | [MSI-cache.sm:163](../../../src/learning_gem5/part3/MSI-cache.sm#L163) 定义 `TBEState`、`DataBlk`、`AcksOutstanding` | 本协议的 TBE 类型由 SLICC 根据该结构生成；[第 652 行](../../../src/learning_gem5/part3/MSI-cache.sm#L652) 的 `allocateTBE` 分配记录，[第 659 行](../../../src/learning_gem5/part3/MSI-cache.sm#L659) 的 `deallocateTBE` 释放记录 |
+| TBEs / TBETable | [MSI-cache.sm:172](../../../src/learning_gem5/part3/MSI-cache.sm#L172) 声明表接口；[第 186 行](../../../src/learning_gem5/part3/MSI-cache.sm#L186) 创建协议中的 `TBEs` 表 | 通用 C++ 模板容器见 [TBETable.hh:57](../../../src/mem/ruby/structures/TBETable.hh#L57)，提供按块地址 allocate / lookup / deallocate 等操作 |
+
+注意两个容易找错的位置：
+
+- **目录控制器不等于 DirectoryMemory。** 前者执行一致性状态机，主要读 `MSI-dir.sm`；后者管理目录条目，主要读 `DirectoryMemory.hh/.cc`。目录 Entry 与缓存 Entry 虽然都叫 `Entry`，却是各自 machine 内定义的不同结构，不能把目录的 Sharers/Owner 当成缓存 Entry 的字段。
+- **协议专属 Entry、TBE 和控制器代码由 SLICC 生成。** 不一定能在 `src/` 中找到同名的手写 C++ 文件；先读 `.sm` 定义，需要追运行实现时再查看当前构建变体生成的代码。`AbstractCacheEntry`、`CacheMemory`、`TBETable` 等则是可直接阅读的通用 C++ 实现。
+
 ## 5. 参数和队列：控制器怎样接入系统
 
 ```slicc
