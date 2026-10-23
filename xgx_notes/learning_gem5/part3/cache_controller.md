@@ -95,13 +95,32 @@ c.sequencer = self.sequencers[i]
 
 例如，`sendGetS` 动作通过 `request_out` 写入 `requestToDir`，随后由网络传输 GetS；控制器并不是通过 `in_port` 发消息。向 Sequencer 发出的读写完成回调则走图中的直接回调路径，不经过这些网络输出队列。
 
-### 三个容易混淆的对象
+### CacheMemory、Entry、L1 控制器和目录控制器分别是什么
 
-| 对象 | 保存或负责什么 |
-|---|---|
-| CacheMemory / Entry | 存放块数据、Tag 及本地缓存行状态等信息 |
-| L1 控制器 | 判断访问权限、执行状态转移、发消息、通知完成 |
-| Directory 控制器 | 记录同一块在各缓存间的副本关系，协调权限和数据来源 |
+可以先按职责区分：**CacheMemory 与 Entry 提供存储及条目管理；L1 控制器与目录控制器负责一致性处理和协调。**
+
+| 对象 | 是什么 | 主要职责 |
+|---|---|---|
+| CacheMemory | Ruby 的缓存存储组件 | 管理 set、way 和缓存条目，提供查找、分配、释放及替换相关操作；不是被模拟的 DDR 内存 |
+| Entry | 表示一个缓存行的软件条目对象 | 保存该块的数据、一致性状态及地址等管理信息；不是整个缓存 |
+| L1 控制器 | 本地 L1 的一致性管理者 | 处理 CPU 请求和网络消息，判断访问权限、执行状态转移、访问缓存、发消息并通知完成 |
+| Directory 控制器 | 多个缓存之间的一致性协调者 | 记录一个块有哪些共享者、谁是 Owner，协调写权限、失效、缓存间供数及内存读写 |
+
+```text
+CPU → RubySequencer → L1 控制器
+                         │ 管理和访问
+                         ↓
+                     CacheMemory
+                     ├── Entry：块 A 的数据与状态
+                     ├── Entry：块 B 的数据与状态
+                     └── ……
+
+L1 控制器 ←→ Ruby 网络 ←→ 目录控制器 ←→ 内存系统
+                              ↕ 经 Ruby 网络
+                         其他 L1 控制器
+```
+
+例如 CPU 要写 X：本地 L1 控制器查找 X 的条目并核对状态；若已经是 M，可在本地完成写入。若是 S，则发送 GetM，请目录协调其他共享者失效。本地控制器收到所需数据和确认后进入 M，再完成写入。**Entry 负责保存这块的数据与状态，不会自己执行一致性协议；具体动作由控制器决定。**
 
 MSI 状态属于单个块，而不是整个 L1。一个缓存可以同时有 S 块、M 块、无效槽位和正在处理的事务。
 
@@ -288,6 +307,18 @@ structure(TBE) {
 ```
 
 Entry 关联缓存槽位，保存块数据与本地状态。TBE 是 Transaction Buffer Entry，记录未完成事务；DataBlk 在需要暂存数据的路径中使用，不是每次接收 Data 都先放入 TBE。
+
+### Entry 就是 cache line 吗
+
+在这个教学实现中，可以近似说 **“一个 Entry 表示一条 cache line（缓存行）”**，但需要区分硬件概念与代码对象：
+
+- **cache line** 是缓存按固定大小管理的一块数据及其相关管理信息；例如块大小为 64 字节时，一条有效缓存行覆盖一段按 64 字节对齐的地址范围。
+- **Entry** 是 gem5 表示、管理这条缓存行的软件对象。上面的 `DataBlk` 保存块数据，`CacheState` 保存 MSI 状态；地址 `m_Address`、框架访问权限等信息来自基类 [AbstractCacheEntry](../../../src/mem/ruby/slicc_interface/AbstractCacheEntry.hh)，所以不能只看 `.sm` 中两个字段就认为 Entry 只有数据和状态。
+- **CacheMemory** 管理许多个 Entry，并按缓存的 set/way 组织相应槽位，实现在 [CacheMemory.hh](../../../src/mem/ruby/structures/CacheMemory.hh)。空槽位或处于无效状态的条目不代表持有一个可用的数据副本。
+
+因此，Entry 不只是 cache line 中的纯数据字节，也不是某次访存请求。**缓存行由 Entry 表示，缓存中的多个条目由 CacheMemory 管理，访问与一致性行为由 L1 控制器协调。**
+
+### TBE 中的字段
 
 | TBE 字段 | 记录什么 |
 |---|---|
