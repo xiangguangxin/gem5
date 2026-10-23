@@ -318,6 +318,55 @@ Entry 关联缓存槽位，保存块数据与本地状态。TBE 是 Transaction 
 
 因此，Entry 不只是 cache line 中的纯数据字节，也不是某次访存请求。**缓存行由 Entry 表示，缓存中的多个条目由 CacheMemory 管理，访问与一致性行为由 L1 控制器协调。**
 
+### CacheMemory 和 Entry：整体管理组件与单个条目
+
+可以把 CacheMemory 类比为管理所有格子的“储物柜”，Entry 则是某个格子里的一块数据及其管理记录。它们不是两份重复的数据存储。
+
+例如，缓存数据容量为 **16 KiB**、每行 **64 B**、**8 路组相联**时：
+
+```text
+缓存行槽位总数 = 16 × 1024 ÷ 64 = 256
+set 数量      = 256 ÷ 8 = 32
+
+CacheMemory
+├── Set 0：Way 0 ... Way 7
+├── Set 1：Way 0 ... Way 7
+├── ……
+└── Set 31：Way 0 ... Way 7
+
+每个已分配的槽位关联一个 Entry，保存该缓存行的数据与管理信息。
+```
+
+这里的 16 KiB 是数据容量，不把 Tag、状态等管理信息的开销计入其中。CPU 读取 X 时，L1 控制器通过 CacheMemory 查找相应 Entry，再结合当前状态判断是否能够完成访问；条目存在也不一定意味着已有有效数据和所需权限。
+
+### 它们是在缓存控制器内部吗
+
+从模型职责上说，**CacheMemory 和它管理的 Entry 是该 L1 控制器使用的缓存资源**；从代码对象上说，CacheMemory 是独立创建、通过参数与控制器关联的组件，并不是将所有缓存数据直接定义在状态机代码里。
+
+教学配置在控制器的 Python 配置类中创建：
+
+```python
+self.cacheMemory = RubyCache(
+    size="16KiB",
+    assoc=8,
+    start_index_bit=self.getBlockSizeBits(system),
+)
+```
+
+这里 Python 的 `RubyCache` 对应 C++ 的 CacheMemory 组件，`.sm` 的 machine 参数则声明 `CacheMemory *cacheMemory`，供控制器查找和管理缓存条目。三者的关系是：
+
+```text
+L1 控制器
+    │ cacheMemory 参数关联
+    ↓
+CacheMemory：组织与管理缓存槽位
+    ├── Entry：一条缓存行的数据、地址与状态
+    ├── Entry
+    └── ……
+```
+
+因此，理解为“控制器管理的缓存资源”比把它们理解成一个不可分割的对象更准确：**控制器决定怎么处理，CacheMemory 负责组织和查找，Entry 保存具体内容。**
+
 ### TBE 中的字段
 
 | TBE 字段 | 记录什么 |
@@ -373,6 +422,41 @@ getState 的顺序是：
 setState 则更新当前存在的 TBE 和 Entry。这样事务进行中可以优先使用临时状态，同时保持关联状态一致。
 
 ## 8. 输入怎样变成事件
+
+### RubyRequest 与 RequestMsg 的区别
+
+**RubyRequest 表达“CPU 想做什么”，RequestMsg 表达“控制器之间需要怎样协调”。** 两者都是消息对象，但处在不同层次；以下对照针对当前教学 MSI 协议。
+
+| 对比项 | RubyRequest | RequestMsg |
+|---|---|---|
+| 用途 | 把 CPU 的访存操作提交给本地缓存控制器 | 在缓存与目录等控制器之间传递一致性请求或控制消息 |
+| 产生方 | CPU 请求路径上的 RubySequencer | 执行协议动作的缓存控制器或目录控制器 |
+| 类型字段 | RubyRequestType，例如 LD、ST、IFETCH | CoherenceRequestType：GetS、GetM、PutS、PutM、Inv、PutAck |
+| 典型字段 | 原始物理地址、块地址 LineAddress、访问大小、请求类型及关联 Packet 等 | 块地址 addr、类型 Type、请求者 Requestor、目的节点 Destination、DataBlk、MessageSize |
+| 路径 | Sequencer → mandatoryQueue → mandatory_in，本地提交，不走协议网络 | 请求走 vnet 0，目录转发或控制消息走 vnet 1，经 Ruby 网络到达对端 |
+| 定义位置 | [RubyRequest.hh](../../../src/mem/ruby/slicc_interface/RubyRequest.hh)，C++ 类 | [MSI-msg.sm](../../../src/learning_gem5/part3/MSI-msg.sm)，由 SLICC 定义并生成代码 |
+
+以 CPU 冷读 X 为例：
+
+```text
+CPU 要读地址 X
+    ↓
+RubySequencer 创建 RubyRequest，类型为 LD
+    ↓
+mandatoryQueue → mandatory_in：识别为 Load 事件
+    ↓
+X 当前为 I，匹配 transition(I, Load, IS_D)
+    ↓
+sendGetS 动作创建新的 RequestMsg，类型为 GetS
+    ↓
+request_out → requestToDir → Ruby 网络 → 目录控制器
+```
+
+这里**不是给 RubyRequest 改个名字，再把同一个对象转发到网络**，而是控制器结合块状态和事件决定是否生成新的协议消息。如果 X 已处于 S/M，读请求可在本地完成，就不需要为这次读生成 GetS。反过来，目录发来的 Inv 等 RequestMsg 也可以触发本地处理，而不对应本地 CPU 新提交的 RubyRequest。
+
+注意，RequestMsg 的名字不能简单理解为“只含请求、不含控制确认”：本例的 PutAck 也使用 RequestMsg，走 forward 路径。Data、InvAck 则使用另一个消息结构 ResponseMsg，走 vnet 2；消息结构与网络类别的关系应以协议声明为准。
+
+### 输入队列怎样解码消息
 
 源码依次声明 response_in、forward_in、mandatory_in，注释说明输入处理顺序或 rank 会影响控制器处理。这个局部处理顺序不能直接推广成网络全局永远严格优先。
 
