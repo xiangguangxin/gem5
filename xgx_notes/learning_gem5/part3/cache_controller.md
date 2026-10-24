@@ -305,6 +305,51 @@ OrSibling      或其他同级 L1 缓存控制器
 
 本例 A 表示确认，D 表示数据；MI_A 等等待的是 PutAck，IM_A 等等待的是失效确认，不能把所有 A 当成同一种确认。下划线是本例命名约定，不是 SLICC 对临时状态的通用语法要求。
 
+### A、D 和 AD 的区别
+
+这里 **A = Acknowledgment（确认），D = Data（数据）**。以申请写权限的 `IM_AD` 和 `IM_A` 为例：
+
+| 状态 | 数据进度 | 确认进度 |
+|---|---|---|
+| IM_AD | 尚未收到本次事务所需的数据消息 | 正在协调失效确认；确认可能没到，也可能已经先到了一部分或全部 |
+| IM_A | 数据消息已经收到并写入缓存 | 仍有必要的失效确认未到，只需继续等确认 |
+
+因此，**AD 表示仍在协调数据和确认，不表示这两者必须同时到达，或两者一定都还没到。** A 状态则表示数据阶段已经完成，但确认条件还没有满足。`SM_AD / SM_A` 的区别类似，只是起始状态为 S，本地原先已有共享副本；这里的 D 指当前权限申请事务所需的数据消息，不表示本地从来没有数据。
+
+数据先到、但确认未齐时，典型路径是：
+
+```text
+I：CPU 要写，控制器发送 GetM
+    ↓
+IM_AD：等待数据消息，同时跟踪可能先到的确认
+    │ Data 到达，但仍缺失效确认（DataDirAcks）
+    ↓
+IM_A：缓存已有数据，只等剩余确认
+    │ 最后一个必要确认到达（LastInvAck）
+    ↓
+M：取得写权限，完成这次写访问
+```
+
+源码对应的两条 transition 是：
+
+```slicc
+transition(IM_AD, DataDirAcks, IM_A) {
+    writeDataToCache;
+    storeAcks;
+    popResponseQueue;
+}
+
+transition({IM_A, SM_A}, LastInvAck, M) {
+    deallocateTBE;
+    externalStoreHit;
+    popResponseQueue;
+}
+```
+
+若失效确认先到，控制器可以在 IM_AD 中更新确认计数，仍保持 IM_AD 继续等数据。如果数据到达时确认条件已经满足，输入处理会识别为 `DataDirNoAcks`，可直接 **IM_AD → M**，不必经过 IM_A；当前协议收到 `DataOwner` 也可直接完成这一转换。
+
+还要结合状态前缀判断 A 等的是什么：**IM_A / SM_A 等失效确认 InvAck，MI_A / SI_A / II_A 等逐出确认 PutAck**。这些是不同事务中的确认，不能只看到后缀 A 就认为处理方式相同。
+
 AccessPermission 用于框架确定数据访问许可，尤其是 functional 访问。协议中的读写动作仍由 transition 决定。例如源码允许 SM_AD/SM_A 中完成 Load，但不能因此直接完成 Store。
 
 ## 7. Entry 与 TBE：存储数据和跟踪事务
