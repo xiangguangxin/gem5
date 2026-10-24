@@ -198,6 +198,8 @@ Python 示例创建统一指令/数据 L1，容量 16KiB、8 路；这些是配�
 
 ## 5. 参数和队列：控制器怎样接入系统
 
+关于队列内部的关键成员、入队/出队、就绪时间、容量背压、阻塞恢复及 Consumer 事件唤醒，见专题 [Message 与 MessageBuffer 源码解读](ruby_message_source.md)。
+
 ```slicc
 machine(MachineType:L1Cache, "MSI cache")
     : Sequencer *sequencer;

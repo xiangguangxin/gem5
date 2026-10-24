@@ -3,6 +3,8 @@
 > 前置阅读：[MSI 基础](msi.md)。本文对应当前仓库的教学 MSI 协议，先跟通一笔事务，再深入状态机。
 > 源码入口：[MSI.slicc](../../../src/learning_gem5/part3/MSI.slicc)、[MSI-msg.sm](../../../src/learning_gem5/part3/MSI-msg.sm)、[MSI-cache.sm](../../../src/learning_gem5/part3/MSI-cache.sm)、[MSI-dir.sm](../../../src/learning_gem5/part3/MSI-dir.sm)。
 
+> 深入消息底层实现：[Message、MessageBuffer 与消息处理链路](ruby_message_source.md)，串联 C++ 消息对象、队列、事件唤醒与 SLICC 输入处理。
+
 ## 1. 从 SimpleCache 到 Ruby：多了什么问题
 
 Part 2 的 SimpleCache 主要回答“块在不在本地，缺失后如何取回”。多核系统还要回答：其他缓存有没有副本？谁拥有最新数据？写之前要让谁失效？
