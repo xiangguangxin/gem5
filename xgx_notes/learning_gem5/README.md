@@ -23,6 +23,8 @@ Part 2 文件名称保留兼容原链接；`stats_output.md` 主要讲事件和�
 
 ## 一致性研究分支
 
+[MSI 状态转换与执行流程](part3/gem5_MSI_guide.md)：稳定状态、瞬态状态和跨控制器消息流速查。
+
 [MSI](part3/msi.md) → [Ruby/SLICC](part3/ruby_slicc.md) → [Cache 控制器](part3/cache_controller.md) → [目录控制器](part3/directory_controller.md) → [配置运行](part3/config_and_run.md)。
 
 这些教学示例用于理解机制，不能直接作为高性能缓存或量产协议实现。源码行数、现有 build 能力及外部链接可能变化，阅读时以当前源码和构建配置为准。
