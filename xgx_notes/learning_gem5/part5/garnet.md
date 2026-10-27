@@ -1,6 +1,6 @@
-# Part 3 · 扩展：Garnet 官方文档导读与本仓库源码地图
+# Part 5 · 第 1 章：Garnet 官方文档导读与本仓库源码地图
 
-> 前置阅读：[Ruby/SLICC](ruby_slicc.md)、[消息与 MessageBuffer](ruby_message_source.md)、[配置与运行](config_and_run.md)。
+> 前置阅读：[Ruby/SLICC](../part3/ruby_slicc.md)、[消息与 MessageBuffer](../part3/ruby_message_source.md)、[配置与运行](../part3/config_and_run.md)。
 > 官方入口：[Garnet 2.0](https://www.gem5.org/documentation/general_docs/ruby/garnet-2/)。整理日期：2026-10-27。
 > 本文围绕官方页面的主题组织学习路线；具体参数、执行流程和版本差异依据本仓库源码整理，不是逐字翻译。文中的实验是后续操作建议，本次未执行构建或仿真。
 

@@ -1,6 +1,6 @@
 # learning_gem5 学习导航
 
-这里保存面向当前仓库的源码阅读笔记与工程练习。整体目标、时间和验收见[学习路线](../gem5-learning-roadmap.md)。已有 Part 1～3 以教学源码解析为主；新增实验与 Part 4 是待实现任务书。
+这里保存面向当前仓库的源码阅读笔记与工程练习。整体目标、时间和验收见[学习路线](../gem5-learning-roadmap.md)。Part 1～3 以教学源码解析为主；实验与 Part 4 包含待实现任务书；Part 5 专门记录 Garnet 与片上网络学习。
 
 ## 推荐阅读顺序
 
@@ -27,7 +27,7 @@ Part 2 文件名称保留兼容原链接；`stats_output.md` 主要讲事件和�
 
 [MSI](part3/msi.md) → [Ruby/SLICC](part3/ruby_slicc.md) → [Cache 控制器](part3/cache_controller.md) → [目录控制器](part3/directory_controller.md) → [配置运行](part3/config_and_run.md)。
 
-完成 Part 3 后阅读 [Garnet 官方文档导读与源码地图](part3/garnet.md)，从协议消息衔接到 flit、路由、VC、credit 与网络性能实验。
+完成 Part 3 后进入 [Part 5：Garnet 与片上网络](part5/README.md)，从[官方文档导读与源码地图](part5/garnet.md)衔接到 flit、路由、VC、credit 与网络性能实验。
 
 这些教学示例用于理解机制，不能直接作为高性能缓存或量产协议实现。源码行数、现有 build 能力及外部链接可能变化，阅读时以当前源码和构建配置为准。
 
