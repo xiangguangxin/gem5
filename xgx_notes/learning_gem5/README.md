@@ -27,6 +27,8 @@ Part 2 文件名称保留兼容原链接；`stats_output.md` 主要讲事件和�
 
 [MSI](part3/msi.md) → [Ruby/SLICC](part3/ruby_slicc.md) → [Cache 控制器](part3/cache_controller.md) → [目录控制器](part3/directory_controller.md) → [配置运行](part3/config_and_run.md)。
 
+完成 Part 3 后阅读 [Garnet 官方文档导读与源码地图](part3/garnet.md)，从协议消息衔接到 flit、路由、VC、credit 与网络性能实验。
+
 这些教学示例用于理解机制，不能直接作为高性能缓存或量产协议实现。源码行数、现有 build 能力及外部链接可能变化，阅读时以当前源码和构建配置为准。
 
 ## 如何记录学习成果
