@@ -8,6 +8,9 @@
 |---|---|---|
 | 1 | [Garnet 官方文档导读与源码地图](garnet.md) | 参数、拓扑与路由、VC/credit、路由器流水线、源码入口和实验建议 |
 | 2 | [MSI 如何通过 Ruby Network 发送消息](msi_ruby_network.md) | GetM 的 SLICC 动作、队列连接、网络注册与接收事件，以及 Garnet 对应路径 |
+| 3 | [Garnet 核心知识点详解](garnet_core_concepts.md) | 十个核心概念的工作过程、时序与竞争示例、性能影响及源码入口 |
+| 4 | [五个核心组件与 Packet/Flit 的完整旅程](garnet_components_and_flits.md) | NI、Router、数据/credit 链路、网络组织，以及拆分与接收交付 |
+| 5 | [Garnet 官方章节顺序导读](garnet_official_order.md) | 按官网正文顺序对照阅读，分别列出官网要点与本仓库说明 |
 
 ## 后续记录方向
 
