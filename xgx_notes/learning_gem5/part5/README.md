@@ -7,6 +7,7 @@
 | 顺序 | 文档 | 内容 |
 |---|---|---|
 | 1 | [Garnet 官方文档导读与源码地图](garnet.md) | 参数、拓扑与路由、VC/credit、路由器流水线、源码入口和实验建议 |
+| 2 | [MSI 如何通过 Ruby Network 发送消息](msi_ruby_network.md) | GetM 的 SLICC 动作、队列连接、网络注册与接收事件，以及 Garnet 对应路径 |
 
 ## 后续记录方向
 
