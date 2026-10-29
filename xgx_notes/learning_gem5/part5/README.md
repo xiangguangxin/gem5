@@ -11,6 +11,7 @@
 | 3 | [Garnet 核心知识点详解](garnet_core_concepts.md) | 十个核心概念的工作过程、时序与竞争示例、性能影响及源码入口 |
 | 4 | [五个核心组件与 Packet/Flit 的完整旅程](garnet_components_and_flits.md) | NI、Router、数据/credit 链路、网络组织，以及拆分与接收交付 |
 | 5 | [Garnet 官方章节顺序导读](garnet_official_order.md) | 按官网正文顺序对照阅读，分别列出官网要点与本仓库说明 |
+| 6 | [NI、Router、VC、Credit 与背压入门](garnet_flow_control_basics.md) | 用同一条消息路径讲清组件关系、逐跳额度、阻塞传播与恢复 |
 
 ## 后续记录方向
 
