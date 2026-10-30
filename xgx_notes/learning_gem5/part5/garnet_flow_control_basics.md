@@ -30,6 +30,100 @@ HEAD 是包头，建立当前跳的输出方向和 VC 关联；BODY 沿用这些
 
 本模拟实现的 flit 保存消息引用和路由等元数据，不是将 C++ 消息对象按 sizeof 切成字节数组。flit 数依据消息类别映射的建模大小计算。
 
+### 2.1 Message、Packet、Flit 的对应关系
+
+| 层次 | 表示什么 | 单目标 Data 示例 |
+|---|---|---|
+| Message | 协议含义与数据，保存类型、地址、目标等字段 | 向 Cache0 返回地址 X 的 Data |
+| Packet | 发往某一个网络目标的一次包传输 | 源 NI 到 Cache0 NI 的一个包 |
+| Flit | 包在缓冲、仲裁、链路和流控中的传输单位 | 同一个包的 H、B1、B2、B3、T |
+
+```text
+一个 Message
+ → 按目标形成一个或多个 Packet
+ → 每个 Packet 包含一个或多个 Flit
+```
+
+单目标消息通常对应一个包。若 Inv 的目标集合为 {Cache0, Cache1, Cache2}，源 NI 会生成三个单播包，每个包再拆成各自的 flit。目标集合由协议控制器指定，NI 执行拆分；Router 主要逐跳处理已生成的 flit。
+
+### 2.2 Packet 没有独立类，代码中怎样体现
+
+当前 Garnet 数据路径没有一个独立的网络 Packet 类，而是用具有共同包身份的一组 flit 表示包。NI 为每个目标调用 getNextPacketID，再循环创建 num_flits 个对象：
+
+```text
+Packet 42
+├─ Flit 0：packet_id=42，id=0，size=5，HEAD
+├─ Flit 1：packet_id=42，id=1，size=5，BODY
+├─ Flit 2：packet_id=42，id=2，size=5，BODY
+├─ Flit 3：packet_id=42，id=3，size=5，BODY
+└─ Flit 4：packet_id=42，id=4，size=5，TAIL
+```
+
+这些 flit 引用同一份为该单播包创建的协议消息副本。包是明确存在的逻辑单位，只是没有被单独封装成一个 C++ 对象。
+
+源码中可以从四处看到它：
+
+- [NetworkInterface.cc](../../../src/mem/ruby/network/garnet/NetworkInterface.cc) 的 flitisizeMessage：生成 packet_id、创建整组 flit，并增加注入包计数。
+- [GarnetNetwork.hh](../../../src/mem/ruby/network/garnet/GarnetNetwork.hh) 的 getNextPacketID：分配下一个包编号。
+- [flit.cc](../../../src/mem/ruby/network/garnet/flit.cc) 的 print：输出 PacketId，便于将同一包的 flit 关联起来。
+- NetworkInterface::incrementStats：每个消费完成的 flit 计入接收 flit 数，TAIL/HEAD_TAIL 还计入接收包数。尾 flit 暂存等待交付时，相关统计推迟到解除等待。
+
+因此注入一个 5-flit 单播包，会产生一次包计数、五次 flit 计数。注入统计发生在 NI 创建 flit 时，不表示它们已全部离开 NI 或到达目标。
+
+### 2.3 Flit 的主要数据字段
+
+[flit.hh](../../../src/mem/ruby/network/garnet/flit.hh) 定义了实际的 class flit。下面按用途列出字段，省略方法与访问控制：
+
+```cpp
+// 字段摘录，按用途重新排列
+int m_packet_id;       // 所属包编号
+int m_id;              // 包内序号
+int m_size;            // 包的 flit 总数
+flit_type m_type;      // HEAD_ / BODY_ / TAIL_ / HEAD_TAIL_
+
+int m_vnet;            // 所属 VNet
+int m_vc;              // 当前传输使用的 VC 编号
+int m_outport;         // 本跳输出端口
+RouteInfo m_route;     // 路由信息
+
+MsgPtr m_msg_ptr;      // 协议消息引用
+uint32_t m_width;      // 当前实现使用的字节宽度
+int msgSize;           // 整条消息的建模字节数
+
+Tick m_enqueue_time, m_dequeue_time;
+Tick m_time;           // 调度使用的就绪时间
+Tick src_delay;        // 源侧等待
+std::pair<flit_stage, Tick> m_stage; // 阶段及其就绪时间
+```
+
+m_size、msgSize、m_width 分别是“包包含多少 flit”“消息多少字节”“每 flit 的建模宽度”，不能混用。例如 72B 消息、16B 宽度对应 m_size=5、msgSize=72、m_width=16。异构变宽路径可改变局部 flit 数与序号，包编号仍用于关联原包。
+
+构造函数根据包长与序号设置类型：总数为 1 时为 HEAD_TAIL，否则序号 0 是 HEAD，最后一个是 TAIL，其余为 BODY。
+
+### 2.4 RouteInfo 和协议数据放在哪里
+
+[CommonTypes.hh](../../../src/mem/ruby/network/garnet/CommonTypes.hh) 中的 RouteInfo 包含：
+
+```cpp
+int vnet;
+NetDest net_dest;
+int src_ni, src_router;
+int dest_ni, dest_router;
+int hops_traversed;
+```
+
+每个 flit 都携带这份路由信息，但 Router 在包头到达时计算输出方向，后续 flit 沿用 VC 中保存的关联，不意味着每个 BODY 都重新选路。
+
+真实协议内容由 m_msg_ptr 引用的 Message 对象保存。例如 [MSI-msg.sm](../../../src/learning_gem5/part3/MSI-msg.sm) 中的 ResponseMsg 有 addr、Type、Sender、Destination、DataBlk、MessageSize 和 Acks。DataBlk 保存缓存块数据；flit 本身没有一个固定的 payload[16] 来保存切出的 16B 原始片段。
+
+目标 NI 在尾 flit 可交付时，将关联消息放入接收队列，这在模拟语义上表示包已经传完并完成交付。不同单播包可引用各自的消息副本，不要将“同一包共享消息引用”理解成所有多播副本都共用同一目标消息对象。
+
+### 2.5 与 gem5 访存 Packet 的区别
+
+gem5 中确实存在访存用的 Packet/PacketPtr，例如 flit::functionalRead(Packet *pkt, ...) 参数中的 Packet。它表示端口间访存操作，定义在 [mem/packet.hh](../../../src/mem/packet.hh)。
+
+本文的 Garnet Packet 则是网络中的包传输单位。看到 Packet 这个词时，应先确认是在讨论访存端口对象，还是一组具有共同 packet_id 的网络 flit。
+
 ## 3. NetworkInterface：控制器接入网络的接口
 
 ### 3.1 发送侧
@@ -50,6 +144,98 @@ NI 的一端连接协议 MessageBuffer，另一端通过链路连接 Router。�
 NI 消费网络送来的 flit。非尾 flit 被消费后返回普通 credit；尾 flit 到达、协议接收队列可用且本周期交付条件允许时，NI 将其关联的消息交付协议队列。
 
 若协议队列暂时满，NI 会保留尾 flit 并推迟交付及相应释放信号。目标端因此也能产生背压。收到消息之后，控制器仍需等队列就绪、执行状态转换，不能将包到达等同于 CPU 访存完成。
+
+### 3.3 flitisizeMessage() 到底做什么
+
+函数入口位于 [NetworkInterface.cc](../../../src/mem/ruby/network/garnet/NetworkInterface.cc)：
+
+```cpp
+bool NetworkInterface::flitisizeMessage(MsgPtr msg_ptr, int vnet)
+```
+
+msg_ptr 是协议消息引用，vnet 是该队列所属的虚拟网络。函数将消息按目标转成单播包，再将每个包转换为 flit，并放入 NI 输出缓冲。返回值表示能否完成该消息剩余全部目标的接手，不是接收方是否已经收到数据。
+
+下面按实际执行顺序阅读：
+
+| 步骤 | 本地动作 | 含义 |
+|---|---|---|
+| 1 | getDestination().getAllDest() | 枚举目标节点 |
+| 2 | getOutportForVnet(vnet) | 找到支持该 VNet 的 NI 输出端口 |
+| 3 | MessageSizeType_to_int / 输出宽度，向上取整 | 得到每包 num_flits |
+| 4 | 对每个目标调用 calculateVC(vnet) | 在该 VNet 内申请 NI 空闲输出 VC；失败返回 false |
+| 5 | clone 消息，设置当前单播目标 | 形成该包对应的协议消息副本 |
+| 6 | 构造 RouteInfo | 记录源/目标 NI 和 Router、目标集合等 |
+| 7 | 增加包计数，调用 getNextPacketID | 标识这个网络包 |
+| 8 | 循环 new flit 并增加 flit 计数 | 生成同一包的全部 flit |
+| 9 | 插入 niOutVcs[vc]，设置源延迟 | 将包放入 NI 的输出缓冲 |
+| 10 | 将 outVcState[vc] 置为 ACTIVE | 该 NI VC 已被包占用 |
+
+其中 calculateVC 分配的是源 NI 的输出 VC；Router 为包头申请下一跳 VC 是后续逐跳流程，两者发生的位置和时间不同。
+
+### 3.4 创建一个包的关键代码
+
+下面摘取实际函数的包标识、计数与缓冲操作；route、num_flits、vc 等在前面已准备：
+
+```cpp
+m_net_ptr->increment_injected_packets(vnet);
+m_net_ptr->update_traffic_distribution(route);
+int packet_id = m_net_ptr->getNextPacketID();
+for (int i = 0; i < num_flits; i++) {
+    m_net_ptr->increment_injected_flits(vnet);
+    flit *fl = new flit(packet_id,
+        i, vc, vnet, route, num_flits, new_msg_ptr,
+        m_net_ptr->MessageSizeType_to_int(
+            net_msg_ptr->getMessageSize()),
+        oPort->bitWidth(), curTick());
+
+    fl->set_src_delay(curTick() - msg_ptr->getTime());
+    niOutVcs[vc].insert(fl);
+}
+
+m_ni_out_vcs_enqueue_time[vc] = curTick();
+outVcState[vc].setState(ACTIVE_, curTick());
+```
+
+例如单目标 72B Data、输出宽度 16B，循环执行 5 次，产生同一 packet_id 的 H/B/B/B/T。函数执行完成时，包可能仍全部位于 NI 缓冲，尚未开始链路传输。
+
+### 3.5 返回 true/false 与多目标重试
+
+NI::wakeup 先 peek 协议队首，只有函数返回 true 才 dequeue：
+
+```cpp
+msg_ptr = b->peekMsgPtr();
+if (flitisizeMessage(msg_ptr, vnet)) {
+    b->dequeue(curTime);
+}
+```
+
+- true：所有剩余目标都已完成 flit 化并交给 NI 缓冲，原协议消息可以出队。
+- false：遇到无法申请 NI 输出 VC 的目标，原协议消息保留，后续再试。
+
+false 不代表前面所有操作回滚。例如多目标 {C0,C1,C2} 中已完成 C0，处理 C1 时无 VC，C0 的包已在 NI 缓冲中。函数会在已处理目标对应的路径上更新原消息目标集合，重试只处理剩余目标，避免重新给 C0 发相同包。
+
+这也意味着“协议消息出队”不等于“物理链路传完”：实际发送由 NI 输出调度及 NetworkLink 在后续事件中推进，还需满足 credit 与发送顺序等条件。
+
+### 3.6 一张端到端关系图
+
+```text
+协议控制器填写消息：目标、消息类型与大小类别
+                  ↓
+MessageBuffer 等待消息就绪
+                  ↓
+NI::wakeup → flitisizeMessage
+                  ├─ 按目标创建单播包与 packet_id
+                  ├─ 按消息大小/端口宽度计算 flit 数
+                  └─ 创建 flit，放入 NI 输出 VC
+                  ↓
+NI 调度 + credit → 链路 → Router 逐跳前进
+                  ↓
+目标 NI 消费各 flit，在尾部可交付时放入协议队列
+                  ↓
+目标控制器解码消息并推进协议状态机
+```
+
+拆分由 NI 执行，但拆分依据由协议字段与网络配置提供；Router 不会每跳重新将整条协议消息拆一遍。变宽桥接可能重新组织局部 flit，属于另一层处理。
 
 ## 4. Router：逐跳选择方向并转发 flit
 
@@ -256,12 +442,17 @@ A 的额度随后耗尽，无法向 B 发；A 的输入 VC 继续积压。最终
 | 收 credit、增加额度、标记 VC 空闲 | [OutputUnit.cc](../../../src/mem/ruby/network/garnet/OutputUnit.cc)：wakeup |
 | credit 字段与链路 | [Credit.hh](../../../src/mem/ruby/network/garnet/Credit.hh)、[CreditLink.hh](../../../src/mem/ruby/network/garnet/CreditLink.hh) |
 
-## 12. 用五个问题检查是否理解
+## 12. 用九个问题检查是否理解
 
 1. NI 已拆出 flit，为什么仍可能发不出去？——可能没有 credit 或未获得发送机会。
 2. 一个 Router 有几个 credit？——按输出端口、下游 VC 分别维护计数，不是每 Router 一个数。
 3. VC 缓冲空了能马上放新包吗？——不一定，原包后续 flit 可能还没到，需检查 VC 状态。
 4. 下游释放槽位，上游能立刻发送吗？——需等对应 credit 到达并满足其他发送条件。
 5. C 停止后为什么 A 还发了一会儿？——上游有剩余额度和缓冲，背压要在资源逐步耗尽后传播。
+
+6. 没有独立 Packet 类，包在哪里？——共同 packet_id、包长和头尾类型的一组 flit 表示它，包统计和日志也记录它。
+7. flitisizeMessage 返回 true 表示包到达了吗？——只表示剩余目标已完成接手，实际传输可能尚未开始。
+8. 多播部分目标已完成后遇到 VC 不足会重发全部吗？——已处理目标已记录，消息保留用于剩余目标重试。
+9. m_size、msgSize、m_width 分别是什么？——包的 flit 总数、整条消息建模字节数、当前 flit 的建模宽度。
 
 更详细的流水线、仲裁和统计口径见[核心知识点详解](garnet_core_concepts.md)，五个网络组件整体关系见[组件与 Packet/Flit 专题](garnet_components_and_flits.md)。
